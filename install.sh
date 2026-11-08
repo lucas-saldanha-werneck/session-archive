@@ -43,6 +43,9 @@ run mkdir -p "$BIN_DIR"
 run cp "$HERE/bin/session-archive" "$BIN_DIR/session-archive"
 run chmod +x "$BIN_DIR/session-archive"
 echo "installed $BIN_DIR/session-archive"
+# Your config file, every key at its default (never overwritten): the same step the plugin runs at session start.
+if [ $DRY = 1 ]; then echo "would run: $PY $BIN_DIR/session-archive seed"
+else "$PY" "$BIN_DIR/session-archive" seed || true; fi
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "note: $BIN_DIR is not on your PATH";; esac
 
 [ $SCHEDULE = 1 ] || exit 0

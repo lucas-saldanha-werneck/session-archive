@@ -1,6 +1,6 @@
 {
   "name": "session-archive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Archive your Claude Code conversations (a readable digest + the gzipped transcript per session) before Claude Code deletes old transcripts. Idempotent: the archive is its own watermark, and sessions that continue get continuation pairs.",
   "author": {
     "name": "Lucas Saldanha Werneck",

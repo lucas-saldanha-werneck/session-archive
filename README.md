@@ -89,6 +89,7 @@ session-archive plan                 # what a run would do; writes nothing
 session-archive run                  # archive (oldest first, 40 pairs per run; --limit N, --dry-run)
 session-archive verify               # check every pair
 session-archive status               # archive folder, last run, retention warning
+session-archive seed                 # create the config file with every default, if missing (--print shows it)
 ```
 
 Add `--json` to any command for machine-readable output.
@@ -111,6 +112,96 @@ The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE
 ```json
 { "out_dir": "~/Documents/claude-archive", "min_turns": 5 }
 ```
+
+### Your settings
+
+The config file is `~/.config/session-archive/config.json` (or `$XDG_CONFIG_HOME/session-archive/config.json`,
+or the file in `$SESSION_ARCHIVE_CONFIG`). The plugin creates it by itself the first time it runs (a
+`SessionStart` hook; outside the plugin, the first `session-archive run`, or `session-archive seed`), with every
+key set to `null` and a short note per key under `_doc` that shows its current default: the same content as
+[`config.example.json`](config.example.json). `null` means "use the built-in default", so that file behaves
+exactly like having no config, and a later version that changes a default reaches you too. Replace a `null` to
+change that setting. It lives outside
+the plugin folder, so `/plugin update` never touches it, and the tool never overwrites or changes a config file
+that is already there. The scheduled run from `install.sh` reads the same file.
+
+### More config keys (config file only)
+
+Paths may start with `~`; a relative path is taken from the archive folder (`out_dir` and `projects_dir`: from the
+folder the command runs in). Any key set to `null` is the same as leaving it out: the built-in default. `""`
+turns `index_file`, `log_file`, `index_header` and `index_heading` off. Inside `digest.labels`, `null` still means
+"leave this field out".
+
+| Key | What it does | Default |
+|---|---|---|
+| `exclude` | Project folder names to skip. A plain entry matches anywhere in the name; `"^x"` matches names that start with `x` | `["-private-tmp-", "-tmp-", "scratchpad"]` |
+| `state_dir` | Where run history, the lock and `last-run.json` go | `<archive>/.state` |
+| `skipped_file` | The list of sessions skipped on purpose (JSON lines). Point it at a file another tool also keeps | `<state_dir>/skipped.jsonl` |
+| `skipped_hash_chars` | How many hex characters of the transcript's sha256 to record. Reading always compares the prefix, so records with shorter hashes from another tool are understood | `64` |
+| `index_file` | One line per pair | `INDEX.md` |
+| `index_header` | Written once when the index file is created | `# Archived Claude Code sessions` |
+| `index_heading` | Template written before each run's lines (empty = none) | `""` |
+| `index_line` | Template for each pair's line | `- {date} [{base}]({base}.digest.md) - {project} - {user_turns} user turns{continuation_note}` |
+| `index_continuation_note` | What `{continuation_note}` becomes for a continuation pair | `" (continuation)"` |
+| `log_file` | One entry per run | `log.md` |
+| `log_position` | `end` appends; `top` puts the newest entry first, under the file's `# ` title line | `end` |
+| `log_heading` | Template for each run's heading | `## [{now}] archived {count} pair(s)` |
+| `log_item` | Template for each pair under the heading | `- {base}` |
+| `pre_command` | Runs before `run` archives anything. A string goes through the shell (`/bin/sh`; `cmd.exe` on Windows); a list runs as is. A non-zero exit stops the run (exit code 4) with nothing written | none |
+| `post_command` | Runs after `run` has released its lock, with the result in its environment (below). A non-zero exit makes `run` exit 1; the pairs stay | none |
+| `digest` | Field labels, order and wording of the digests (below) | English labels |
+
+Template placeholders: `{now}` (local `YYYY-MM-DD HH:MM`), `{today}`, `{count}`, `{new}`, `{continued}`, and
+`{env[NAME]}` (an environment variable; empty when unset). Per-pair templates also get `{base}`, `{date}`,
+`{project}`, `{user_turns}`, `{lines}`, `{session}`.
+
+Environment of `pre_command` and `post_command`: `SESSION_ARCHIVE_OUT`, `SESSION_ARCHIVE_STATE`; and for
+`post_command` also `SESSION_ARCHIVE_STATUS` (`ok`, `partial`, `fail`), `SESSION_ARCHIVE_WRITTEN`,
+`SESSION_ARCHIVE_NEW`, `SESSION_ARCHIVE_CONTINUED`, `SESSION_ARCHIVE_LEFT` and `SESSION_ARCHIVE_REPORT` (path of
+a JSON file with the run report). Use them to record the run in another tool's ledger, or to refuse to start
+while something else is writing to the same folder.
+
+### Digest format (`digest`)
+
+The digest fields are read back to know what is already archived, so an archive written earlier in a
+different format (another language, a bullet list, another dash) can be adopted by telling the tool its
+labels. Each label can be a string or a list: the first is written, all of them are accepted when reading.
+
+| Key | What it does | Default |
+|---|---|---|
+| `labels` | Label per field: `date`, `session`, `project`, `source`, `raw_copy`, `lines`, `continues`, `user_turns`, `compactions`, `archived`. `null` leaves a field out. `session` and `lines` cannot be empty | English (`Date`, `Session`, `Lines`, ...) |
+| `fields` | Order of the fields in the header (`session` and `lines` are added if missing) | the order above |
+| `field_prefix` | Put before each field, such as `"- "` for a bullet list | `""` |
+| `session_format` | How the session id is written; `{id}` is the id | `` "`{id}`" `` |
+| `range_separator` | Between the two numbers of `lines` (read back as well as written) | `"-"` |
+| `none` | Written when there were no compactions | `"(none)"` |
+| `headings` | `tldr` and `conversation` section titles | `TL;DR`, `Conversation (text only, tool calls omitted)` |
+| `speakers` | `user` and `assistant` names in `**[NAME]**` | `USER`, `CLAUDE` |
+| `speaker_inline` | `true` puts the text on the same line as the name | `false` |
+
+Reading is lenient whatever the labels: a field may start with a bullet (`- `, `* `), the id may or may not
+be in backticks, and the range may use `-`, `–`, `—` or your `range_separator`.
+
+The config is checked before anything is written: every key's type, every template (formatted with sample
+values), and the digest format, by writing a sample header and reading it back. A format whose session id
+or line range would not read back (a label used for two fields, an id format the reader cannot find) is
+refused with a message saying what read back wrong. Each pair is read back again after it is written; if
+that fails, both of its files are removed and the run reports the session as failed.
+
+Example: adopt an archive whose digests look like `- **Sitzung:** <id>` and `- **Zeilen:** 1–40`:
+
+```json
+{
+  "out_dir": "~/notes/sessions",
+  "digest": {
+    "labels": { "session": ["Sitzung", "Session"], "lines": ["Zeilen", "Lines"] },
+    "field_prefix": "- ", "session_format": "{id}", "range_separator": "–"
+  }
+}
+```
+
+Run `session-archive plan` after changing labels: it writes nothing, and `already archived sessions` should
+match the number of sessions your archive already holds.
 
 To make the archive outlive your machine, put the folder inside something that syncs or is backed up.
 
@@ -139,8 +230,11 @@ python3 tests/test_session_archive.py -v
 
 They build a fake `~/.claude/projects` tree in a temp folder (a normal session, a short one, a subagent
 transcript, a live one, a temp-folder project) and check the pairs byte for byte, skips, idempotency,
-continuations, broken-copy recovery, the run limit, config precedence, the lock, the gap warning, and
-`install.sh` with a fake `launchctl`.
+continuations, broken-copy recovery, the run limit, config precedence, the lock, the gap warning, every
+config key above (labels read and written, shared skip list, index and log templates, hooks), the first-run
+config file (created when missing, an existing file byte-identical, `XDG_CONFIG_HOME` and
+`SESSION_ARCHIVE_CONFIG` respected, no crash on a read-only folder, the seeded file giving the same plan, report
+and archive as no file), and `install.sh` with a fake `launchctl`.
 
 ## Uninstall
 
