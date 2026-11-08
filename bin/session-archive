@@ -14,6 +14,7 @@ Commands:
   run      archive. --limit N (default 40, oldest first), --dry-run
   verify   check every pair: the .gz opens and holds the line count its digest promises
   status   last run, counts, and a warning when the last run is older than Claude Code's retention
+  seed     create the config file with every default if it is missing (--quiet, --print)
 
 Common options: --out DIR, --projects DIR, --min-turns N, --min-kb N, --live-minutes N, --json
 
@@ -26,6 +27,8 @@ Config (each optional; flags win over env, env wins over the config file):
                             index_file, index_header, index_line, index_continuation_note, log_file, log_heading,
                             log_item, pre_command, post_command, digest (labels, field order, headings, speakers).
                             See the README for each key. The file lives outside the plugin, so it survives updates.
+                            The first run creates it with every key at its default (also `session-archive seed`);
+                            an existing file is never overwritten.
 """
 import argparse
 import datetime as dt
@@ -62,9 +65,105 @@ DEFAULT_INDEX_LINE = ("- {date} [{base}]({base}.digest.md) - {project} - {user_t
                       "{continuation_note}")
 DEFAULT_LOG_HEADING = "## [{now}] archived {count} pair(s)"
 DEFAULT_LOG_ITEM = "- {base}"
+DEFAULT_INDEX_HEADER = "# Archived Claude Code sessions\n\n"
+DEFAULT_CONTINUATION_NOTE = " (continuation)"
 
 
 # ---------------------------------------------------------------- config
+def config_path():
+    """The config file every command reads: $SESSION_ARCHIVE_CONFIG, else $XDG_CONFIG_HOME or ~/.config."""
+    home = os.path.expanduser("~")
+    return os.environ.get("SESSION_ARCHIVE_CONFIG") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "session-archive", "config.json")
+
+
+STARTER_DOC = {
+    "about": "session-archive settings. Created by session-archive on its first run; plugin updates never touch "
+             "this file. Every key holds its default, so this file behaves exactly like having none. Flags win "
+             "over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this "
+             "file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is "
+             "taken from the archive folder.",
+    "out_dir": "Archive folder. null = ~/claude-session-archive.",
+    "projects_dir": "Claude Code transcripts folder. null = $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
+    "min_turns": "Sessions with fewer user turns are skipped as trivial.",
+    "min_kb": "Sessions smaller than this many KB are skipped as trivial.",
+    "live_minutes": "A transcript written in the last N minutes is live (usually this session) and waits.",
+    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x.",
+    "state_dir": "Run history, lock and last-run.json. null = <archive>/.state.",
+    "skipped_file": "Sessions skipped on purpose (JSON lines). null = <state_dir>/skipped.jsonl.",
+    "skipped_hash_chars": "Hex characters of the transcript sha256 to record.",
+    "index_file": "One line per pair. null or \"\" = no index.",
+    "index_header": "Written once when the index file is created. null = nothing.",
+    "index_heading": "Template written before each run's index lines. \"\" = none.",
+    "index_line": "Template for each pair's index line.",
+    "index_continuation_note": "What {continuation_note} becomes for a continuation pair.",
+    "log_file": "One entry per run. null or \"\" = no log.",
+    "log_position": "\"end\" appends; \"top\" puts the newest entry first, under the # title line.",
+    "log_heading": "Template for each run's log heading.",
+    "log_item": "Template for each pair under the log heading.",
+    "pre_command": "Runs before run archives anything (a string goes through the shell; a list runs as is). "
+                   "Non-zero exit stops the run. null = none.",
+    "post_command": "Runs after run, with the result in its environment. null = none.",
+    "digest": "Digest labels (string, list of accepted labels, or null to leave a field out), field order, "
+              "field_prefix, session_format ({id}), range_separator, none, headings, speakers, speaker_inline. "
+              "The README has the details.",
+}
+
+
+def starter_config():
+    """The starter config.json: every key at its default, with a note per key under _doc."""
+    digest = json.loads(json.dumps(DEFAULT_DIGEST))
+    return {
+        "_doc": STARTER_DOC,
+        "out_dir": None,
+        "projects_dir": None,
+        "min_turns": 10,
+        "min_kb": 50,
+        "live_minutes": 2,
+        "exclude": list(DEFAULT_EXCLUDE),
+        "state_dir": None,
+        "skipped_file": None,
+        "skipped_hash_chars": 64,
+        "index_file": "INDEX.md",
+        "index_header": DEFAULT_INDEX_HEADER,
+        "index_heading": "",
+        "index_line": DEFAULT_INDEX_LINE,
+        "index_continuation_note": DEFAULT_CONTINUATION_NOTE,
+        "log_file": "log.md",
+        "log_position": "end",
+        "log_heading": DEFAULT_LOG_HEADING,
+        "log_item": DEFAULT_LOG_ITEM,
+        "pre_command": None,
+        "post_command": None,
+        "digest": digest,
+    }
+
+
+def starter_text():
+    return json.dumps(starter_config(), indent=2, ensure_ascii=False) + "\n"
+
+
+def seed_config():
+    """Create the config file from the starter if nothing is there. Never overwrites or changes an existing
+    file (open mode "x"). Returns ("created" | "kept" | "failed", path, error)."""
+    path = config_path()
+    try:
+        if os.path.lexists(path):
+            return "kept", path, None
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)  # raises if a file is in the way: that is a failure, not "kept"
+        try:
+            f = open(path, "x", encoding="utf-8", newline="\n")
+        except FileExistsError:  # created by someone else in between
+            return "kept", path, None
+        with f:
+            f.write(starter_text())
+        return "created", path, None
+    except Exception as e:  # unwritable folder, a file in the way, ...: never stop the caller
+        return "failed", path, e
+
+
 def _str(cfg, key, default, nullable=False):
     v = cfg.get(key, default)
     if v is None and nullable:
@@ -99,8 +198,7 @@ def _number(value, key, cast, positive=False):
 
 def load_config(args):
     home = os.path.expanduser("~")
-    cfg_path = os.environ.get("SESSION_ARCHIVE_CONFIG") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "session-archive", "config.json")
+    cfg_path = config_path()
     cfg = {}
     if os.path.isfile(cfg_path):
         try:
@@ -117,7 +215,7 @@ def load_config(args):
             return flag
         if env and os.environ.get(env):
             return os.environ[env]
-        if key in cfg:
+        if cfg.get(key) is not None:  # null = the default
             return cfg[key]
         return default
 
@@ -148,9 +246,9 @@ def load_config(args):
         die(f"skipped_hash_chars must be a positive whole number; got {json.dumps(hc)}")
     c["skipped_hash_chars"] = hc
     c["index_file"] = expand(cfg.get("index_file", "INDEX.md"), c["out"])
-    c["index_header"] = _str(cfg, "index_header", "# Archived Claude Code sessions\n\n", nullable=True)
+    c["index_header"] = _str(cfg, "index_header", DEFAULT_INDEX_HEADER, nullable=True)
     c["index_line"] = _str(cfg, "index_line", DEFAULT_INDEX_LINE)
-    c["index_continuation_note"] = _str(cfg, "index_continuation_note", " (continuation)")
+    c["index_continuation_note"] = _str(cfg, "index_continuation_note", DEFAULT_CONTINUATION_NOTE)
     c["log_file"] = expand(cfg.get("log_file", "log.md"), c["out"])
     c["log_heading"] = _str(cfg, "log_heading", DEFAULT_LOG_HEADING)
     c["log_item"] = _str(cfg, "log_item", DEFAULT_LOG_ITEM)
@@ -873,6 +971,19 @@ def cmd_status(c, a):
             print(f"WARNING {w}")
 
 
+def cmd_seed(a):
+    if a.print:
+        sys.stdout.write(starter_text())
+        return
+    state, path, err = seed_config()
+    if a.quiet:
+        return
+    if state == "failed":
+        print(f"could not create {path}: {err}", file=sys.stderr)
+        sys.exit(1)
+    print(f"{state} {path}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="session-archive", description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="version", version=VERSION)
@@ -890,7 +1001,16 @@ def main(argv=None):
     r.add_argument("--dry-run", action="store_true")
     sub.add_parser("verify", parents=[common], help="check every archived pair")
     sub.add_parser("status", parents=[common], help="last run and gap warning")
+    sd = sub.add_parser("seed", help="create the config file with every default, if it is missing (never "
+                                     "overwrites); the plugin runs this at session start")
+    sd.add_argument("--quiet", action="store_true", help="print nothing and always exit 0")
+    sd.add_argument("--print", action="store_true", help="print the starter config instead of writing it")
     a = ap.parse_args(argv)
+    if a.cmd == "seed":
+        return cmd_seed(a)
+    # First use creates the config file too (plan and --dry-run write nothing, so they do not).
+    if a.cmd != "plan" and not getattr(a, "dry_run", False):
+        seed_config()
     c = load_config(a)
     {"plan": cmd_plan, "run": cmd_run, "verify": cmd_verify, "status": cmd_status}[a.cmd](c, a)
 

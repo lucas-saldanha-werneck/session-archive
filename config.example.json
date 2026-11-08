@@ -1,0 +1,89 @@
+{
+  "_doc": {
+    "about": "session-archive settings. Created by session-archive on its first run; plugin updates never touch this file. Every key holds its default, so this file behaves exactly like having none. Flags win over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is taken from the archive folder.",
+    "out_dir": "Archive folder. null = ~/claude-session-archive.",
+    "projects_dir": "Claude Code transcripts folder. null = $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
+    "min_turns": "Sessions with fewer user turns are skipped as trivial.",
+    "min_kb": "Sessions smaller than this many KB are skipped as trivial.",
+    "live_minutes": "A transcript written in the last N minutes is live (usually this session) and waits.",
+    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x.",
+    "state_dir": "Run history, lock and last-run.json. null = <archive>/.state.",
+    "skipped_file": "Sessions skipped on purpose (JSON lines). null = <state_dir>/skipped.jsonl.",
+    "skipped_hash_chars": "Hex characters of the transcript sha256 to record.",
+    "index_file": "One line per pair. null or \"\" = no index.",
+    "index_header": "Written once when the index file is created. null = nothing.",
+    "index_heading": "Template written before each run's index lines. \"\" = none.",
+    "index_line": "Template for each pair's index line.",
+    "index_continuation_note": "What {continuation_note} becomes for a continuation pair.",
+    "log_file": "One entry per run. null or \"\" = no log.",
+    "log_position": "\"end\" appends; \"top\" puts the newest entry first, under the # title line.",
+    "log_heading": "Template for each run's log heading.",
+    "log_item": "Template for each pair under the log heading.",
+    "pre_command": "Runs before run archives anything (a string goes through the shell; a list runs as is). Non-zero exit stops the run. null = none.",
+    "post_command": "Runs after run, with the result in its environment. null = none.",
+    "digest": "Digest labels (string, list of accepted labels, or null to leave a field out), field order, field_prefix, session_format ({id}), range_separator, none, headings, speakers, speaker_inline. The README has the details."
+  },
+  "out_dir": null,
+  "projects_dir": null,
+  "min_turns": 10,
+  "min_kb": 50,
+  "live_minutes": 2,
+  "exclude": [
+    "-private-tmp-",
+    "-tmp-",
+    "scratchpad"
+  ],
+  "state_dir": null,
+  "skipped_file": null,
+  "skipped_hash_chars": 64,
+  "index_file": "INDEX.md",
+  "index_header": "# Archived Claude Code sessions\n\n",
+  "index_heading": "",
+  "index_line": "- {date} [{base}]({base}.digest.md) - {project} - {user_turns} user turns{continuation_note}",
+  "index_continuation_note": " (continuation)",
+  "log_file": "log.md",
+  "log_position": "end",
+  "log_heading": "## [{now}] archived {count} pair(s)",
+  "log_item": "- {base}",
+  "pre_command": null,
+  "post_command": null,
+  "digest": {
+    "labels": {
+      "date": "Date",
+      "session": "Session",
+      "project": "Project",
+      "source": "Source",
+      "raw_copy": "Raw copy",
+      "lines": "Lines",
+      "continues": "Continues",
+      "user_turns": "User turns",
+      "compactions": "Compactions",
+      "archived": "Archived"
+    },
+    "fields": [
+      "date",
+      "session",
+      "project",
+      "source",
+      "raw_copy",
+      "lines",
+      "continues",
+      "user_turns",
+      "compactions",
+      "archived"
+    ],
+    "field_prefix": "",
+    "session_format": "`{id}`",
+    "range_separator": "-",
+    "none": "(none)",
+    "headings": {
+      "tldr": "TL;DR",
+      "conversation": "Conversation (text only, tool calls omitted)"
+    },
+    "speakers": {
+      "user": "USER",
+      "assistant": "CLAUDE"
+    },
+    "speaker_inline": false
+  }
+}

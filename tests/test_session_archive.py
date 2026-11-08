@@ -46,8 +46,9 @@ class Base(unittest.TestCase):
         self.home = os.path.join(self.tmp, "home")
         self.projects = os.path.join(self.home, ".claude", "projects")
         self.out = os.path.join(self.tmp, "archive")
+        # XDG_CONFIG_HOME is dropped too: the first run creates the config file, and it must land in the temp HOME
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith("SESSION_ARCHIVE") and k != "CLAUDE_CONFIG_DIR"}
+                    if not k.startswith("SESSION_ARCHIVE") and k not in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME")}
         self.env.update({"HOME": self.home, "USERPROFILE": self.home, "SESSION_ARCHIVE_DIR": self.out,
                          "PYTHONIOENCODING": "utf-8"})
         os.makedirs(self.projects)
@@ -508,6 +509,139 @@ class TestReviewFixes(TestConfigOptions):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestSeed(Base):
+    """First run: the config file is created with every default, never overwritten, and behaves like none."""
+
+    def default_cfg(self):
+        return os.path.join(self.home, ".config", "session-archive", "config.json")
+
+    def read_bytes(self, path):
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_seed_creates_the_starter_silently(self):
+        r = self.cli("seed", "--quiet")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        with open(os.path.join(ROOT, "config.example.json"), "rb") as f:
+            example = f.read().replace(b"\r\n", b"\n")
+        self.assertEqual(self.read_bytes(self.default_cfg()), example,
+                         "the seeded file is config.example.json, byte for byte")
+
+    def test_starter_holds_every_key_at_its_default(self):
+        self.cli("seed", "--quiet")
+        with open(self.default_cfg(), encoding="utf-8") as f:
+            cfg = json.load(f)
+        keys = set(cfg) - {"_doc"}
+        self.assertEqual(keys, set(cfg["_doc"]) - {"about"}, "every key has a note")
+        self.assertEqual(cfg["min_turns"], 10)
+        self.assertEqual(cfg["exclude"], ["-private-tmp-", "-tmp-", "scratchpad"])
+        self.assertIsNone(cfg["out_dir"])
+
+    def test_existing_file_is_byte_identical(self):
+        path = self.default_cfg()
+        os.makedirs(os.path.dirname(path))
+        mine = b'{"min_turns": 3, "min_kb": 0}\n'
+        with open(path, "wb") as f:
+            f.write(mine)
+        self.assertEqual(self.cli("seed").stdout.strip(), f"kept {path}")
+        self.write_session(S_MAIN, conversation(4))
+        rep = self.run_json()
+        self.assertEqual(len(rep["written"]), 1, "the user's min_turns still applies")
+        self.cli("status")
+        self.assertEqual(self.read_bytes(path), mine)
+
+    def test_first_run_creates_it_and_plan_or_dry_run_do_not(self):
+        self.cli("plan")
+        self.cli("run", "--dry-run")
+        self.assertFalse(os.path.exists(self.default_cfg()))
+        self.cli("run")
+        self.assertTrue(os.path.isfile(self.default_cfg()))
+
+    def test_env_overrides_are_respected(self):
+        self.env["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "xdg")
+        self.cli("seed", "--quiet")
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "xdg", "session-archive", "config.json")))
+        self.env["SESSION_ARCHIVE_CONFIG"] = os.path.join(self.tmp, "mine", "sa.json")
+        self.cli("seed", "--quiet")
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "mine", "sa.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")))
+
+    def test_unwritable_location_never_crashes(self):
+        with open(os.path.join(self.tmp, "afile"), "w") as f:
+            f.write("x")
+        self.env["SESSION_ARCHIVE_CONFIG"] = os.path.join(self.tmp, "afile", "config.json")
+        r = self.cli("seed", "--quiet")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        r = self.cli("seed", ok=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("could not create", r.stderr)
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.assertEqual(len(self.run_json()["written"]), 1, "run still works without a config file")
+
+    def test_read_only_folder_never_crashes(self):
+        ro = os.path.join(self.tmp, "ro")
+        os.makedirs(ro)
+        os.chmod(ro, 0o555)
+        try:
+            if os.name == "nt" or os.access(ro, os.W_OK):
+                self.skipTest("this user can write to a read-only folder (Windows or root)")
+            self.env["XDG_CONFIG_HOME"] = ro
+            r = self.cli("seed", "--quiet")
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+            self.assertFalse(os.path.exists(os.path.join(ro, "session-archive")))
+            self.cli("status")
+        finally:
+            os.chmod(ro, 0o755)
+
+    def test_seeded_config_behaves_like_no_config(self):
+        """Same sessions archived twice, once with no config file at all and once with the seeded one: the
+        plan, the run report and every file written are the same."""
+        import re
+
+        def archive(label, seeded):
+            out = os.path.join(self.tmp, label)
+            self.env["SESSION_ARCHIVE_DIR"] = out
+            if seeded:
+                self.env["SESSION_ARCHIVE_CONFIG"] = os.path.join(self.tmp, label + "-config.json")
+                self.cli("seed", "--quiet")
+                self.assertTrue(os.path.isfile(self.env["SESSION_ARCHIVE_CONFIG"]))
+            else:  # a config path that can never exist
+                with open(os.path.join(self.tmp, "nofile"), "w") as f:
+                    f.write("x")
+                self.env["SESSION_ARCHIVE_CONFIG"] = os.path.join(self.tmp, "nofile", "config.json")
+
+            def norm(t):
+                for form in (json.dumps(out)[1:-1], out, out.replace(os.sep, "/")):
+                    t = t.replace(form, "<out>")
+                return re.sub(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?(\.\d+)?(Z|[+-]\d\d:\d\d)?", "<time>", t)
+
+            result = [norm(self.cli("plan", "--json").stdout), norm(self.cli("run", "--json").stdout)]
+            for root, _, files in os.walk(out):
+                for name in sorted(files):
+                    p = os.path.join(root, name)
+                    rel = os.path.relpath(p, out)
+                    if name.endswith(".gz"):
+                        with gzip.open(p, "rb") as f:
+                            result.append((rel, f.read()))
+                    elif not rel.startswith(".state"):
+                        with open(p, encoding="utf-8") as f:
+                            result.append((rel, norm(f.read())))
+            return sorted(result, key=str)
+
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.write_session(S_SMALL, conversation(3))
+        self.write_session(S_TMP, conversation(12, pad=5000), project="-private-tmp-scratch")
+        none, seeded = archive("none", False), archive("seeded", True)
+        self.assertGreater(len(none), 4)
+        self.assertEqual(none, seeded)
+
+    def test_hook_runs_the_seed(self):
+        with open(os.path.join(ROOT, "hooks", "hooks.json"), encoding="utf-8") as f:
+            hook = json.load(f)["hooks"]["SessionStart"][0]["hooks"][0]
+        self.assertIn('"${CLAUDE_PLUGIN_ROOT}/bin/session-archive" seed --quiet', hook["command"])
+        self.assertTrue(hook["command"].rstrip().endswith("exit 0"), "never a failing exit code at session start")
+
+
 class TestInstall(Base):
     def sh(self, *args):
         bash = shutil.which("bash")
@@ -529,11 +663,14 @@ class TestInstall(Base):
         self.assertIn("com.claude-tools.session-archive", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.home, ".local")))
         self.assertFalse(os.path.exists(os.path.join(self.home, "Library")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")))
 
     def test_install_schedule_macos_and_uninstall(self):
         r = self.sh("--schedule", "--os", "macos", "--no-load")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.home, ".local", "bin", "session-archive")))
+        self.assertTrue(os.path.isfile(os.path.join(self.home, ".config", "session-archive", "config.json")),
+                        "install also seeds the config file")
         plist = os.path.join(self.home, "Library", "LaunchAgents", "com.claude-tools.session-archive.plist")
         with open(plist, encoding="utf-8") as f:
             body = f.read()

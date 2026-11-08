@@ -89,6 +89,7 @@ session-archive plan                 # what a run would do; writes nothing
 session-archive run                  # archive (oldest first, 40 pairs per run; --limit N, --dry-run)
 session-archive verify               # check every pair
 session-archive status               # archive folder, last run, retention warning
+session-archive seed                 # create the config file with every default, if missing (--print shows it)
 ```
 
 Add `--json` to any command for machine-readable output.
@@ -112,13 +113,20 @@ The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE
 { "out_dir": "~/Documents/claude-archive", "min_turns": 5 }
 ```
 
-**Your settings survive plugin updates.** The config file lives in `~/.config`, outside the plugin folder, so
-`/plugin update` (which replaces the plugin folder) never touches it. The scheduled run from `install.sh`
-reads the same file.
+### Your settings
+
+The config file is `~/.config/session-archive/config.json` (or `$XDG_CONFIG_HOME/session-archive/config.json`,
+or the file in `$SESSION_ARCHIVE_CONFIG`). The plugin creates it by itself the first time it runs (a
+`SessionStart` hook; outside the plugin, the first `session-archive run`, or `session-archive seed`), with every
+key at its default and a short note per key under `_doc`: the same content as
+[`config.example.json`](config.example.json). That file behaves exactly like having no config. It lives outside
+the plugin folder, so `/plugin update` never touches it, and the tool never overwrites or changes a config file
+that is already there. The scheduled run from `install.sh` reads the same file.
 
 ### More config keys (config file only)
 
-Paths may start with `~`; a relative path is taken from the archive folder. `null` or `""` turns a file off.
+Paths may start with `~`; a relative path is taken from the archive folder. `null` or `""` turns `index_file`
+and `log_file` off; for `out_dir`, `projects_dir`, `state_dir` and `skipped_file`, `null` means the default.
 
 | Key | What it does | Default |
 |---|---|---|
@@ -219,8 +227,10 @@ python3 tests/test_session_archive.py -v
 They build a fake `~/.claude/projects` tree in a temp folder (a normal session, a short one, a subagent
 transcript, a live one, a temp-folder project) and check the pairs byte for byte, skips, idempotency,
 continuations, broken-copy recovery, the run limit, config precedence, the lock, the gap warning, every
-config key above (labels read and written, shared skip list, index and log templates, hooks), and
-`install.sh` with a fake `launchctl`.
+config key above (labels read and written, shared skip list, index and log templates, hooks), the first-run
+config file (created when missing, an existing file byte-identical, `XDG_CONFIG_HOME` and
+`SESSION_ARCHIVE_CONFIG` respected, no crash on a read-only folder, the seeded file giving the same plan, report
+and archive as no file), and `install.sh` with a fake `launchctl`.
 
 ## Uninstall
 
