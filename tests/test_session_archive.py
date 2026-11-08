@@ -415,6 +415,99 @@ class TestConfigOptions(Base):
             self.assertEqual(f.read().strip(), "ok")
 
 
+class TestReviewFixes(TestConfigOptions):
+    """Regression tests for the review of the config options."""
+
+    def no_files(self):
+        return not os.path.isdir(self.out) or not [f for f in os.listdir(self.out) if f.endswith((".md", ".gz"))]
+
+    def test_custom_range_separator_is_read_back(self):
+        self.main = self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(digest={"range_separator": " to "})
+        self.run_json()
+        with open(self.main, "a", encoding="utf-8", newline="\n") as f:
+            f.write(line("user", "One more question") + "\n" + line("assistant", "Answer.") + "\n")
+        t = time.time() - 600
+        os.utime(self.main, (t, t))
+        self.assertEqual(self.run_json()["written"], ["2026-03-04_parser-refactor-cont-1"])
+        self.assertIn("**Lines:** 38 to 39", self.read("2026-03-04_parser-refactor-cont-1.digest.md"))
+        self.assertEqual(self.run_json()["written"], [], "the continuation's range is read back")
+
+    def test_unreadable_digest_format_is_refused_before_writing(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(digest={"session_format": "id={id}"})
+        r = self.cli("plan", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("read back", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotEqual(self.cli("run", ok=False).returncode, 0)
+        self.assertTrue(self.no_files(), "no orphan pair")
+
+    def test_label_clash_that_misreads_lines_is_refused(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(digest={"labels": {"date": "Lines"}})  # "Lines: 2026-03-04" would read as range 2026-3
+        r = self.cli("run", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("read back", r.stderr)
+        self.assertTrue(self.no_files())
+
+    def test_post_write_check_removes_the_pair(self):
+        import importlib.machinery
+        import types
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        os.makedirs(self.out)
+        old = dict(os.environ)
+        os.environ.update(self.env)
+        try:
+            sa = types.ModuleType("sa")
+            importlib.machinery.SourceFileLoader("sa", CLI).exec_module(sa)
+            c = sa.load_config(types.SimpleNamespace(out=None, projects=None, min_turns=None, min_kb=None,
+                                                     live_minutes=None))
+            c["digest"]["write"]["date"] = "Lines"  # break it after the load-time check
+            item = sa.plan(c)["new"][0]
+            with self.assertRaises(RuntimeError):
+                sa.write_pair(c, item)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertTrue(self.no_files(), "both files of a pair that fails the read-back are removed")
+
+    def test_templates_are_checked_before_writing(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        for key, tpl in (("index_line", "- {nope}"), ("log_item", "{base.upper}x{date.x}"),
+                         ("log_heading", "{0}"), ("index_heading", "{env.x}")):
+            self.config(**{key: tpl})
+            r = self.cli("plan", ok=False)
+            self.assertNotEqual(r.returncode, 0, key)
+            self.assertIn(key, r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertNotEqual(self.cli("run", ok=False).returncode, 0)
+            self.assertTrue(self.no_files(), key)
+
+    def test_wrong_types_are_clear_errors(self):
+        cases = [{"skipped_hash_chars": -1}, {"skipped_hash_chars": "abc"}, {"skipped_hash_chars": 0},
+                 {"exclude": "tmp"}, {"exclude": [3]}, {"exclude": ["^"]}, {"index_line": 5},
+                 {"state_dir": 5}, {"min_turns": "x"}, {"pre_command": 5}, {"post_command": {"a": 1}},
+                 {"post_command": []}, {"log_position": 1}, {"digest": {"speaker_inline": "yes"}},
+                 {"digest": {"labels": {"session": 5}}}, {"digest": {"range_separator": ""}},
+                 {"digest": {"fields": "date"}}]
+        for cfg in cases:
+            self.config(**cfg)
+            r = self.cli("plan", ok=False)
+            self.assertNotEqual(r.returncode, 0, cfg)
+            self.assertNotIn("Traceback", r.stderr, cfg)
+            key = list(cfg)[0] if list(cfg)[0] != "digest" else "digest"
+            self.assertIn(key, r.stderr, cfg)
+
+    def test_post_command_runs_after_the_lock_is_released(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        code = ("import os, sys; sys.exit(1 if os.path.exists("
+                "os.path.join(os.environ['SESSION_ARCHIVE_STATE'], 'lock')) else 0)")
+        self.config(post_command=[sys.executable, "-c", code])
+        r = self.cli("run", ok=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class TestInstall(Base):
     def sh(self, *args):
         bash = shutil.which("bash")

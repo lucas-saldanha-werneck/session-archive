@@ -136,7 +136,7 @@ Paths may start with `~`; a relative path is taken from the archive folder. `nul
 | `log_heading` | Template for each run's heading | `## [{now}] archived {count} pair(s)` |
 | `log_item` | Template for each pair under the heading | `- {base}` |
 | `pre_command` | Runs before `run` archives anything. A string goes through the shell (`/bin/sh`; `cmd.exe` on Windows); a list runs as is. A non-zero exit stops the run (exit code 4) with nothing written | none |
-| `post_command` | Runs after `run`, with the result in its environment (below). A non-zero exit makes `run` exit 1; the pairs stay | none |
+| `post_command` | Runs after `run` has released its lock, with the result in its environment (below). A non-zero exit makes `run` exit 1; the pairs stay | none |
 | `digest` | Field labels, order and wording of the digests (below) | English labels |
 
 Template placeholders: `{now}` (local `YYYY-MM-DD HH:MM`), `{today}`, `{count}`, `{new}`, `{continued}`, and
@@ -161,14 +161,20 @@ labels. Each label can be a string or a list: the first is written, all of them 
 | `fields` | Order of the fields in the header (`session` and `lines` are added if missing) | the order above |
 | `field_prefix` | Put before each field, such as `"- "` for a bullet list | `""` |
 | `session_format` | How the session id is written; `{id}` is the id | `` "`{id}`" `` |
-| `range_separator` | Between the two numbers of `lines` | `"-"` |
+| `range_separator` | Between the two numbers of `lines` (read back as well as written) | `"-"` |
 | `none` | Written when there were no compactions | `"(none)"` |
 | `headings` | `tldr` and `conversation` section titles | `TL;DR`, `Conversation (text only, tool calls omitted)` |
 | `speakers` | `user` and `assistant` names in `**[NAME]**` | `USER`, `CLAUDE` |
 | `speaker_inline` | `true` puts the text on the same line as the name | `false` |
 
 Reading is lenient whatever the labels: a field may start with a bullet (`- `, `* `), the id may or may not
-be in backticks, and the range may use `-`, `–` or `—`.
+be in backticks, and the range may use `-`, `–`, `—` or your `range_separator`.
+
+The config is checked before anything is written: every key's type, every template (formatted with sample
+values), and the digest format, by writing a sample header and reading it back. A format whose session id
+or line range would not read back (a label used for two fields, an id format the reader cannot find) is
+refused with a message saying what read back wrong. Each pair is read back again after it is written; if
+that fails, both of its files are removed and the run reports the session as failed.
 
 Example: adopt an archive whose digests look like `- **Sitzung:** <id>` and `- **Zeilen:** 1–40`:
 
