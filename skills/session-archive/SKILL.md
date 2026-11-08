@@ -22,7 +22,8 @@ The command is `session-archive` (on the Bash tool's PATH while the plugin is en
 2. **Run.** `session-archive run` (oldest first, at most 40 pairs per run; `--limit N` to change). If it says
    sessions are left over the limit, run it again until nothing is left, or tell the user how many remain.
    Each pair is read back from disk (gzip line count and digest header) before it counts as archived.
-3. **TL;DR.** Each new digest has a `<!-- TLDR: not written yet -->` line under `## TL;DR`. For each digest
+3. **TL;DR.** Each new digest has a `<!-- TLDR: not written yet -->` line under its TL;DR heading (the
+   heading text can be changed in the config). For each digest
    the run printed, read its conversation section and replace that line with up to 5 lines: what the session
    did and decided. Keep everything else in the digest as it is. If the user is in a hurry or there are many,
    say how many TL;DRs are still open instead of writing them.
@@ -30,7 +31,9 @@ The command is `session-archive` (on the Bash tool's PATH while the plugin is en
    sessions left, where the archive is (`session-archive status` shows the folder and the last run).
 
 If `run` exits with code 3, another run holds the lock: wait, or check that no run is active and delete the
-`.state/lock` file it names.
+lock file it names. Exit code 4 means the user's `pre_command` refused to start (it prints why); report that
+and do not work around it. A `post_command exited N` message means the pairs were written but the user's
+follow-up command failed: report it.
 
 ## Settings the user may ask about
 
@@ -38,6 +41,11 @@ If `run` exits with code 3, another run holds the lock: wait, or check that no r
   Default `~/claude-session-archive`.
 - Thresholds: `--min-turns`, `--min-kb`, `--live-minutes` (or `min_turns`, `min_kb`, `live_minutes`,
   `exclude` in the config file).
+- Digest labels, index and log files, a shared skip list, and commands to run before and after: keys in the
+  same config file (`digest`, `index_file`, `log_file`, `skipped_file`, `pre_command`, `post_command`, ...;
+  the plugin README lists them). The file is outside the plugin folder, so it survives plugin updates. After
+  a change, `session-archive plan` shows whether existing digests are still recognized
+  (`already archived sessions`).
 - Retention: Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) from
   `~/.claude/settings.json`. `session-archive status` warns when the last successful run is close to that.
 - A daily run without Claude: `./install.sh --schedule` from the repo (launchd on macOS, a crontab line on

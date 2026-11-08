@@ -21,7 +21,11 @@ Config (each optional; flags win over env, env wins over the config file):
   SESSION_ARCHIVE_DIR       archive folder (default ~/claude-session-archive)
   SESSION_ARCHIVE_PROJECTS  transcripts folder (default $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects)
   SESSION_ARCHIVE_CONFIG    config file (default ~/.config/session-archive/config.json) with keys
-                            out_dir, projects_dir, min_turns, min_kb, live_minutes, exclude (list of substrings)
+                            out_dir, projects_dir, min_turns, min_kb, live_minutes, exclude (list of substrings,
+                            "^x" = folder name starts with x), state_dir, skipped_file, skipped_hash_chars,
+                            index_file, index_header, index_line, index_continuation_note, log_file, log_heading,
+                            log_item, pre_command, post_command, digest (labels, field order, headings, speakers).
+                            See the README for each key. The file lives outside the plugin, so it survives updates.
 """
 import argparse
 import datetime as dt
@@ -30,16 +34,34 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import unicodedata
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-SESSION_FIELD = re.compile(r"^\*\*Session:\*\*\s*`?([0-9a-f-]{36})`?", re.M)
-LINES_FIELD = re.compile(r"^\*\*Lines:\*\*\s*(\d+)\s*[-–]\s*(\d+)", re.M)
 TLDR_PLACEHOLDER = "<!-- TLDR: not written yet -->"
 DEFAULT_EXCLUDE = ["-private-tmp-", "-tmp-", "scratchpad"]
+FIELD_KEYS = ["date", "session", "project", "source", "raw_copy", "lines", "continues", "user_turns",
+              "compactions", "archived"]
+DEFAULT_DIGEST = {
+    "labels": {"date": "Date", "session": "Session", "project": "Project", "source": "Source",
+               "raw_copy": "Raw copy", "lines": "Lines", "continues": "Continues", "user_turns": "User turns",
+               "compactions": "Compactions", "archived": "Archived"},
+    "fields": list(FIELD_KEYS),
+    "field_prefix": "",
+    "session_format": "`{id}`",
+    "range_separator": "-",
+    "none": "(none)",
+    "headings": {"tldr": "TL;DR", "conversation": "Conversation (text only, tool calls omitted)"},
+    "speakers": {"user": "USER", "assistant": "CLAUDE"},
+    "speaker_inline": False,
+}
+DEFAULT_INDEX_LINE = ("- {date} [{base}]({base}.digest.md) - {project} - {user_turns} user turns"
+                      "{continuation_note}")
+DEFAULT_LOG_HEADING = "## [{now}] archived {count} pair(s)"
+DEFAULT_LOG_ITEM = "- {base}"
 
 
 # ---------------------------------------------------------------- config
@@ -76,8 +98,67 @@ def load_config(args):
         "exclude": list(cfg.get("exclude", DEFAULT_EXCLUDE)),
         "claude_dir": claude_dir,
     }
-    c["state"] = os.path.join(c["out"], ".state")
+    c["state"] = expand(cfg.get("state_dir"), c["out"]) or os.path.join(c["out"], ".state")
+    c["skipped_file"] = expand(cfg.get("skipped_file"), c["out"]) or os.path.join(c["state"], "skipped.jsonl")
+    c["skipped_hash_chars"] = int(cfg.get("skipped_hash_chars") or 64)
+    c["index_file"] = expand(cfg.get("index_file", "INDEX.md"), c["out"])
+    c["index_header"] = cfg.get("index_header", "# Archived Claude Code sessions\n\n")
+    c["index_line"] = cfg.get("index_line", DEFAULT_INDEX_LINE)
+    c["index_continuation_note"] = cfg.get("index_continuation_note", " (continuation)")
+    c["log_file"] = expand(cfg.get("log_file", "log.md"), c["out"])
+    c["log_heading"] = cfg.get("log_heading", DEFAULT_LOG_HEADING)
+    c["log_item"] = cfg.get("log_item", DEFAULT_LOG_ITEM)
+    c["log_position"] = cfg.get("log_position", "end")
+    if c["log_position"] not in ("end", "top"):
+        die("log_position must be \"end\" or \"top\"")
+    c["index_heading"] = cfg.get("index_heading", "")
+    c["pre_command"] = cfg.get("pre_command") or None
+    c["post_command"] = cfg.get("post_command") or None
+    c["digest"] = digest_config(cfg.get("digest") or {})
     return c
+
+
+def expand(value, base):
+    """A path from the config: ~ expanded, relative paths taken from the archive folder. Empty or null = off."""
+    if not value:
+        return None
+    value = os.path.expanduser(str(value))
+    return value if os.path.isabs(value) else os.path.join(base, value)
+
+
+def digest_config(user):
+    d = json.loads(json.dumps(DEFAULT_DIGEST))
+    for k, v in user.items():
+        if k not in d:
+            die(f"unknown digest key {k!r}; known: {', '.join(d)}")
+        if isinstance(d[k], dict):
+            if not isinstance(v, dict):
+                die(f"digest.{k} must be an object")
+            unknown = set(v) - set(d[k])
+            if unknown:
+                die(f"unknown digest.{k} key(s): {', '.join(sorted(unknown))}")
+            d[k].update(v)
+        else:
+            d[k] = v
+    for k in d["fields"]:
+        if k not in FIELD_KEYS:
+            die(f"unknown digest field {k!r}; known: {', '.join(FIELD_KEYS)}")
+    for k in ("session", "lines"):
+        if not d["labels"].get(k):
+            die(f"digest.labels.{k} cannot be empty: the archive reads it back to know what is already archived")
+        if k not in d["fields"]:
+            d["fields"].append(k)
+    # each label may be a string or a list: the first is written, all are accepted when reading
+    d["read"] = {k: ([v] if isinstance(v, str) else list(v or [])) for k, v in d["labels"].items()}
+    d["write"] = {k: (v[0] if v else None) for k, v in d["read"].items()}
+
+    def field_re(labels, value):
+        alt = "|".join(re.escape(x) for x in labels)
+        return re.compile(r"^[ \t]*(?:[-*+][ \t]+)?\*\*(?:" + alt + r"):?\*\*:?[ \t]*" + value, re.M)
+
+    d["session_re"] = field_re(d["read"]["session"], r"`?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+    d["lines_re"] = field_re(d["read"]["lines"], r"(\d+)[ \t]*[-\u2013\u2014][ \t]*(\d+)")
+    return d
 
 
 def die(msg, code=1):
@@ -114,6 +195,11 @@ def gz_line_count(path):
             return sum(1 for _ in f)
     except Exception:
         return None
+
+
+def same_hash(recorded, path):
+    """A recorded hash may be cut short (skipped_hash_chars, or another tool sharing the file): compare the prefix."""
+    return bool(recorded) and sha256(path).startswith(str(recorded))
 
 
 def sha256(path):
@@ -223,7 +309,7 @@ def summarize(entries):
     return info
 
 
-def distill(entries, start=1):
+def distill(entries, start=1, dg=None):
     """Markdown conversation: user and assistant text only; tool calls are cut and the cut is marked."""
     out, pending_tools = [], 0
     for n, e in enumerate(entries, start):
@@ -240,8 +326,10 @@ def distill(entries, start=1):
         if pending_tools:
             out.append(f"_[{pending_tools} tool call(s) and result(s) omitted]_")
             pending_tools = 0
-        who = "USER" if e["type"] == "user" else "CLAUDE"
-        out.append(f"**[{who}]**\n\n{text.strip()}")
+        sp = (dg or DEFAULT_DIGEST)["speakers"]
+        who = sp["user"] if e["type"] == "user" else sp["assistant"]
+        sep = " " if (dg or DEFAULT_DIGEST)["speaker_inline"] else "\n\n"
+        out.append(f"**[{who}]**{sep}{text.strip()}")
     if pending_tools:
         out.append(f"_[{pending_tools} tool call(s) and result(s) omitted]_")
     return "\n\n".join(out) if out else "_(no conversation text in these lines)_"
@@ -255,7 +343,7 @@ def local_date(ts, fallback_path):
 
 
 # ---------------------------------------------------------------- archive state (the watermark)
-def archived_sessions(out_dir):
+def archived_sessions(out_dir, dg):
     """session id -> {digests, lines (contiguous coverage from line 1), broken[]}."""
     res = {}
     if not os.path.isdir(out_dir):
@@ -266,13 +354,13 @@ def archived_sessions(out_dir):
         d = os.path.join(out_dir, name)
         with open(d, encoding="utf-8", errors="ignore") as f:
             head = f.read(4000)
-        m = SESSION_FIELD.search(head)
+        m = dg["session_re"].search(head)
         if not m:
             continue
         sid = m.group(1)
         gz = d[: -len(".digest.md")] + ".jsonl.gz"
         n = gz_line_count(gz) if os.path.exists(gz) else None
-        lm = LINES_FIELD.search(head)
+        lm = dg["lines_re"].search(head)
         e = res.setdefault(sid, {"digests": [], "ranges": [], "broken": [], "lines": 0})
         e["digests"].append(d)
         if lm:
@@ -297,13 +385,18 @@ def archived_sessions(out_dir):
     return res
 
 
+def excluded(proj, patterns):
+    """A pattern is a substring of the project folder name; "^x" means the name starts with x."""
+    return any(proj.startswith(x[1:]) if x.startswith("^") else x in proj for x in patterns)
+
+
 def session_files(c):
     if not os.path.isdir(c["projects"]):
         return []
     files = []
     for proj in sorted(os.listdir(c["projects"])):
         pdir = os.path.join(c["projects"], proj)
-        if not os.path.isdir(pdir) or any(x in proj for x in c["exclude"]):
+        if not os.path.isdir(pdir) or excluded(proj, c["exclude"]):
             continue
         for name in sorted(os.listdir(pdir)):
             if name.endswith(".jsonl") and UUID_RE.match(name[:-6]):
@@ -312,8 +405,8 @@ def session_files(c):
 
 
 def plan(c):
-    archived = archived_sessions(c["out"])
-    skipped = {r["session"]: r for r in read_jsonl(os.path.join(c["state"], "skipped.jsonl"))}
+    archived = archived_sessions(c["out"], c["digest"])
+    skipped = {r["session"]: r for r in read_jsonl(c["skipped_file"])}
     new, cont, skips = [], [], []
     live_cut = time.time() - c["live_minutes"] * 60
     for f in session_files(c):
@@ -330,7 +423,7 @@ def plan(c):
                 cont.append({"session": sid, "jsonl": f, "from": a["lines"] + 1, "to": cur, "digests": a["digests"]})
             continue
         prev = skipped.get(sid)
-        if prev and prev.get("size") == size and (prev.get("mtime") == mtime or prev.get("sha256") == sha256(f)):
+        if prev and prev.get("size") == size and (prev.get("mtime") == mtime or same_hash(prev.get("sha256"), f)):
             continue  # skipped on purpose before and unchanged since
         entries = parse_entries(read_lines(f))
         info = summarize(entries)
@@ -381,30 +474,34 @@ def write_pair(c, item, cont=False):
     gz_path = os.path.join(c["out"], base + ".jsonl.gz")
     md_path = os.path.join(c["out"], base + ".digest.md")
     write_atomic(gz_path, gzip.compress(b"".join(chunk)), mode="wb")
-    lines = [
-        f"# {base.split('_', 1)[-1]}",
-        "",
-        f"**Date:** {local_date(info['first_ts'], f)}",
-        f"**Session:** `{item['session']}`",
-        f"**Project:** {info['cwd'] or os.path.basename(os.path.dirname(f))}",
-        f"**Source:** {f}",
-        f"**Raw copy:** {os.path.basename(gz_path)}",
-        f"**Lines:** {a}-{b}",
-    ]
-    if prev:
-        lines.append(f"**Continues:** {os.path.basename(prev)}")
+    dg = c["digest"]
+    date = local_date(info["first_ts"], f)
+    values = {
+        "date": date,
+        "session": dg["session_format"].format(id=item["session"]),
+        "project": info["cwd"] or os.path.basename(os.path.dirname(f)),
+        "source": f,
+        "raw_copy": os.path.basename(gz_path),
+        "lines": f"{a}{dg['range_separator']}{b}",
+        "continues": os.path.basename(prev) if prev else None,
+        "user_turns": part_info["user_turns"],
+        "compactions": part_info["compactions"] or dg["none"],
+        "archived": f"{iso(now())} by session-archive {VERSION}",
+    }
+    lines = [f"# {base.split('_', 1)[-1]}", ""]
+    for k in dg["fields"]:
+        label = dg["write"].get(k)
+        if label and values.get(k) is not None:
+            lines.append(f"{dg['field_prefix']}**{label}:** {values[k]}")
     lines += [
-        f"**User turns:** {part_info['user_turns']}",
-        f"**Compactions:** {part_info['compactions'] or '(none)'}",
-        f"**Archived:** {iso(now())} by session-archive {VERSION}",
         "",
-        "## TL;DR",
+        f"## {dg['headings']['tldr']}",
         "",
         TLDR_PLACEHOLDER,
         "",
-        "## Conversation (text only, tool calls omitted)",
+        f"## {dg['headings']['conversation']}",
         "",
-        distill(part, start=a),
+        distill(part, start=a, dg=dg),
         "",
     ]
     write_atomic(md_path, "\n".join(lines))
@@ -412,10 +509,10 @@ def write_pair(c, item, cont=False):
     n = gz_line_count(gz_path)
     with open(md_path, encoding="utf-8") as fh:
         head = fh.read(4000)
-    if n != b - a + 1 or f"`{item['session']}`" not in head:
+    if n != b - a + 1 or not dg["session_re"].search(head):
         raise RuntimeError(f"verification failed for {base}: gz lines {n}, expected {b - a + 1}")
     return {"base": base, "session": item["session"], "lines": f"{a}-{b}", "user_turns": part_info["user_turns"],
-            "project": info["cwd"] or "", "date": local_date(info["first_ts"], f), "continuation": cont}
+            "project": info["cwd"] or "", "date": date, "continuation": cont}
 
 
 # ---------------------------------------------------------------- lock
@@ -473,9 +570,72 @@ def cmd_plan(c, a):
     print_plan(plan(c), a.json)
 
 
+class DefaultDict(dict):
+    """{env[NAME]} in a template: an unset variable becomes an empty string."""
+    def __missing__(self, key):
+        return ""
+
+
+def fill(template, values, what):
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError, ValueError) as e:
+        die(f"{what} template {template!r} is invalid ({e}); placeholders: {', '.join(sorted(values))}")
+
+
+def write_index_and_log(c, made):
+    t = now().astimezone()
+    common = {"now": t.strftime("%Y-%m-%d %H:%M"), "today": t.strftime("%Y-%m-%d"), "count": len(made),
+              "new": len([m for m in made if not m["continuation"]]),
+              "continued": len([m for m in made if m["continuation"]]), "env": DefaultDict(os.environ)}
+    if c["index_file"]:
+        os.makedirs(os.path.dirname(c["index_file"]), exist_ok=True)
+        if not os.path.exists(c["index_file"]) and c["index_header"]:
+            append_text(c["index_file"], c["index_header"])
+        if c["index_heading"]:
+            append_text(c["index_file"], "\n" + fill(c["index_heading"], common, "index_heading") + "\n\n")
+        append_text(c["index_file"], "".join(fill(c["index_line"], dict(
+            common, **m, continuation_note=c["index_continuation_note"] if m["continuation"] else ""),
+            "index_line") + "\n" for m in made))
+    if c["log_file"]:
+        os.makedirs(os.path.dirname(c["log_file"]), exist_ok=True)
+        items = "".join(fill(c["log_item"], dict(common, **m), "log_item") + "\n" for m in made)
+        entry = fill(c["log_heading"], common, "log_heading") + "\n\n" + items + "\n"
+        if c["log_position"] == "top" and os.path.exists(c["log_file"]):
+            with open(c["log_file"], encoding="utf-8") as fh:
+                old = fh.read()
+            head, rest = "", old
+            if old.startswith("# "):  # keep the file's title line (and the blank line after it) on top
+                first, _, rest = old.partition("\n")
+                head = first + "\n"
+                if rest.startswith("\n"):
+                    head, rest = head + "\n", rest[1:]
+            write_atomic(c["log_file"], head + entry + rest)
+        else:
+            append_text(c["log_file"], entry)
+
+
+def run_hook(c, which, extra_env=None):
+    """pre_command / post_command: a string (run by the shell) or a list (run as is). Returns the exit code."""
+    cmd = c[which]
+    env = dict(os.environ)
+    env.update({"SESSION_ARCHIVE_OUT": c["out"], "SESSION_ARCHIVE_STATE": c["state"]})
+    env.update(extra_env or {})
+    try:
+        r = subprocess.run(cmd, shell=isinstance(cmd, str), env=env)
+    except OSError as e:
+        print(f"session-archive: {which} could not start: {e}", file=sys.stderr)
+        return 127
+    return r.returncode
+
+
 def cmd_run(c, a):
     os.makedirs(c["out"], exist_ok=True)
     with Lock(c["state"]):
+        if c["pre_command"] and not a.dry_run:
+            rc = run_hook(c, "pre_command")
+            if rc != 0:
+                die(f"pre_command exited {rc}; nothing was archived", 4)
         p = plan(c)
         todo_new = p["new"][: a.limit]
         room = max(0, a.limit - len(todo_new))
@@ -493,20 +653,14 @@ def cmd_run(c, a):
                 failed.append(f"{item['session']}: {e}")
         for s in p["skipped"]:
             if s.get("record"):
-                append_text(os.path.join(c["state"], "skipped.jsonl"), json.dumps(
-                    {"session": s["session"], "reason": s["reason"], "size": s["size"], "sha256": sha256(s["jsonl"]),
+                os.makedirs(os.path.dirname(c["skipped_file"]), exist_ok=True)
+                append_text(c["skipped_file"], json.dumps(
+                    {"session": s["session"], "reason": s["reason"], "size": s["size"],
+                     "sha256": sha256(s["jsonl"])[: c["skipped_hash_chars"]],
                      "mtime": os.path.getmtime(s["jsonl"]),
                      "at": iso(now())}) + "\n")
         if made:
-            idx = os.path.join(c["out"], "INDEX.md")
-            if not os.path.exists(idx):
-                append_text(idx, "# Archived Claude Code sessions\n\n")
-            append_text(idx, "".join(
-                f"- {m['date']} [{m['base']}]({m['base']}.digest.md) - {m['project']} - {m['user_turns']} user turns"
-                f"{' (continuation)' if m['continuation'] else ''}\n" for m in made))
-            append_text(os.path.join(c["out"], "log.md"),
-                        f"## [{now().astimezone().strftime('%Y-%m-%d %H:%M')}] archived {len(made)} pair(s)\n\n"
-                        + "".join(f"- {m['base']}\n" for m in made) + "\n")
+            write_index_and_log(c, made)
         status = "ok" if not failed and left == 0 else ("partial" if made or left else "fail")
         if failed and not made:
             status = "fail"
@@ -517,6 +671,18 @@ def cmd_run(c, a):
         report = {"status": status, "written": [m["base"] for m in made], "skipped": [
             {"session": s["session"], "reason": s["reason"]} for s in p["skipped"]], "failed": failed, "left": left,
             "out": c["out"], "broken": p["broken"]}
+        report_path = os.path.join(c["state"], "last-run.json")
+        write_atomic(report_path, json.dumps(report, indent=1) + "\n")
+        if c["post_command"]:
+            rc = run_hook(c, "post_command", {
+                "SESSION_ARCHIVE_STATUS": status, "SESSION_ARCHIVE_REPORT": report_path,
+                "SESSION_ARCHIVE_WRITTEN": str(len(made)),
+                "SESSION_ARCHIVE_NEW": str(len([m for m in made if not m["continuation"]])),
+                "SESSION_ARCHIVE_CONTINUED": str(len([m for m in made if m["continuation"]])),
+                "SESSION_ARCHIVE_LEFT": str(left)})
+            report["post_command_exit"] = rc
+            if rc != 0:
+                print(f"session-archive: post_command exited {rc}", file=sys.stderr)
         if a.json:
             print(json.dumps(report, indent=1))
         else:
@@ -533,12 +699,12 @@ def cmd_run(c, a):
                 print(f"WARNING broken archive for {sid}: {'; '.join(why)}")
             if made:
                 print(f"next: fill the TL;DR in each new digest (look for '{TLDR_PLACEHOLDER}')")
-        if status == "fail":
+        if status == "fail" or report.get("post_command_exit"):
             sys.exit(1)
 
 
 def cmd_verify(c, a):
-    arch = archived_sessions(c["out"])
+    arch = archived_sessions(c["out"], c["digest"])
     bad = {sid: e["broken"] for sid, e in arch.items() if e["broken"]}
     pairs = sum(len(e["digests"]) for e in arch.values())
     if a.json:

@@ -237,6 +237,184 @@ class TestArchive(Base):
         self.assertEqual(rep["written"], [])
 
 
+class TestConfigOptions(Base):
+    """Every option added for archives that already exist in another format or share files with other tools."""
+
+    def config(self, **cfg):
+        path = os.path.join(self.tmp, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+        self.env["SESSION_ARCHIVE_CONFIG"] = path
+
+    def read(self, name):
+        with open(os.path.join(self.out, name), encoding="utf-8") as f:
+            return f.read()
+
+    def existing_pair(self, sid, base, lines_field=None, session_line=None, n=None):
+        """A pair written by some other tool, in another label format."""
+        os.makedirs(self.out, exist_ok=True)
+        src = os.path.join(self.projects, "-work-demo", sid + ".jsonl")
+        with open(src, "rb") as f:
+            raw = f.readlines()
+        n = n or len(raw)
+        with gzip.open(os.path.join(self.out, base + ".jsonl.gz"), "wb") as f:
+            f.write(b"".join(raw[:n]))
+        head = ["# " + base, "", "- **Datum:** 2026-03-04", session_line or f"- **Sitzung:** {sid}"]
+        if lines_field:
+            head.append(lines_field)
+        with open(os.path.join(self.out, base + ".digest.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(head) + "\n")
+
+    def test_read_labels_recognize_an_existing_archive(self):
+        self.main = self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.existing_pair(S_MAIN, "2026-03-04_old")
+        # default labels do not know "Sitzung": the session looks new
+        self.assertIn("new: 1", self.cli("plan").stdout)
+        self.config(digest={"labels": {"session": ["Sitzung", "Session"], "lines": ["Zeilen", "Lines"]}})
+        r = self.cli("plan")
+        self.assertIn("already archived sessions: 1", r.stdout)
+        self.assertIn("new: 0", r.stdout)
+
+    def test_lines_label_with_bullet_and_en_dash_drives_continuations(self):
+        self.main = self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.existing_pair(S_MAIN, "2026-03-04_old", lines_field="- **Zeilen:** 1–20", n=20)
+        self.config(digest={"labels": {"session": "Sitzung", "lines": "Zeilen"}})
+        p = json.loads(self.cli("plan", "--json").stdout)
+        self.assertEqual([(x["from"], x["to"]) for x in p["continued"]], [(21, 37)])
+
+    def test_write_labels_order_prefix_headings_and_speakers(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(digest={
+            "labels": {"date": "Datum", "session": ["Sitzung", "Session"], "project": None, "lines": "Zeilen",
+                       "user_turns": None, "archived": None, "compactions": "Kompaktierung"},
+            "fields": ["date", "session", "lines", "source", "compactions"],
+            "field_prefix": "- ", "session_format": "{id}", "range_separator": "–", "none": "(keine)",
+            "headings": {"conversation": "Gespraech"}, "speakers": {"user": "ICH"}, "speaker_inline": True})
+        base = self.run_json()["written"][0]
+        md = self.read(base + ".digest.md")
+        head = md.split("\n\n## ")[0].splitlines()[2:]
+        self.assertEqual([h.split(":**")[0] for h in head],
+                         ["- **Datum", "- **Sitzung", "- **Zeilen", "- **Source", "- **Kompaktierung"])
+        self.assertIn(f"- **Sitzung:** {S_MAIN}\n", md)
+        self.assertIn("- **Zeilen:** 1–37\n", md)
+        self.assertIn("- **Kompaktierung:** (keine)", md)
+        self.assertNotIn("Project", md)
+        self.assertIn("## Gespraech", md)
+        self.assertIn("**[ICH]** Refactor the parser module please", md)
+        self.assertIn("**[CLAUDE]** Done with step 0.", md)
+        self.assertEqual(self.run_json()["written"], [], "what it wrote, it reads back")
+        self.assertEqual(self.cli("verify").returncode, 0)
+
+    def test_empty_session_label_and_unknown_keys_are_rejected(self):
+        self.config(digest={"labels": {"session": None}})
+        r = self.cli("plan", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("digest.labels.session", r.stderr)
+        self.config(digest={"labels": {"sesion": "x"}})
+        self.assertIn("unknown digest.labels", self.cli("plan", ok=False).stderr)
+
+    def test_state_dir_and_shared_skipped_file_with_short_hashes(self):
+        self.write_session(S_SMALL, conversation(3))
+        state = os.path.join(self.tmp, "state")
+        shared = os.path.join(self.tmp, "ledger", "skipped.jsonl")
+        self.config(state_dir=state, skipped_file=shared, skipped_hash_chars=16)
+        self.run_json()
+        with open(shared, encoding="utf-8") as f:
+            rec = json.loads(f.readline())
+        self.assertEqual(len(rec["sha256"]), 16)
+        self.assertTrue(os.path.exists(os.path.join(state, "runs.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, ".state")))
+        # a record from another tool: short hash, no mtime -> still recognized as unchanged
+        with open(shared, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"session": S_SMALL, "reason": "trivial", "size": rec["size"],
+                                "sha256": rec["sha256"]}) + "\n")
+        self.assertEqual(self.run_json()["skipped"], [])
+
+    def test_exclude_prefix_pattern(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000), project="-var-folders-x-T-tmp-abc")
+        self.write_session(S_TMP, conversation(12, pad=5000), project="-tmp-thing")
+        self.config(exclude=["^-tmp-"])
+        rep = self.run_json()
+        self.assertEqual(len(rep["written"]), 1, "'-tmp-' in the middle is kept, at the start it is excluded")
+        self.assertNotIn(S_TMP, json.dumps(rep))
+
+    def test_index_and_log_files_templates_and_position(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        log = os.path.join(self.tmp, "wiki", "log.md")
+        os.makedirs(os.path.dirname(log))
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("# Log\n\n## older entry\n")
+        self.env["RUN_TAG"] = "r42"
+        self.config(index_file="catalog.md", index_header="", index_heading="## Run {today} {env[RUN_TAG]}",
+                    index_line="* `{base}` ({user_turns}){continuation_note}", log_file=log,
+                    log_position="top", log_heading="## [{today}] {count} new={new} cont={continued}",
+                    log_item="  - {base}")
+        base = self.run_json()["written"][0]
+        idx = self.read("catalog.md")
+        self.assertIn(" r42\n", idx)
+        self.assertIn(f"* `{base}` (12)\n", idx)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "INDEX.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "log.md")))
+        with open(log, encoding="utf-8") as f:
+            body = f.read()
+        self.assertTrue(body.startswith("# Log\n\n## ["), body)
+        self.assertIn("1 new=1 cont=0\n\n  - " + base, body)
+        self.assertTrue(body.rstrip().endswith("## older entry"))
+
+    def test_index_and_log_can_be_turned_off(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(index_file=None, log_file="")
+        self.assertEqual(len(self.run_json()["written"]), 1)
+        self.assertEqual(sorted(f for f in os.listdir(self.out) if f.endswith(".md") and ".digest" not in f), [])
+
+    def test_bad_template_is_reported(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(index_line="- {nope}")
+        r = self.cli("run", ok=False)
+        self.assertIn("index_line template", r.stderr)
+
+    def test_pre_command_failure_stops_the_run(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(pre_command=[sys.executable, "-c", "import sys; sys.exit(3)"])
+        r = self.cli("run", ok=False)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("pre_command exited 3", r.stderr)
+        self.assertEqual(self.pairs(), [])
+
+    def test_post_command_gets_the_report(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        seen = os.path.join(self.tmp, "seen.json")
+        code = ("import json, os; json.dump({k: v for k, v in os.environ.items() "
+                "if k.startswith('SESSION_ARCHIVE_')}, open(%r, 'w'))" % seen)
+        self.config(pre_command=[sys.executable, "-c", "pass"], post_command=[sys.executable, "-c", code])
+        self.run_json()
+        with open(seen, encoding="utf-8") as f:
+            env = json.load(f)
+        self.assertEqual((env["SESSION_ARCHIVE_STATUS"], env["SESSION_ARCHIVE_WRITTEN"],
+                          env["SESSION_ARCHIVE_NEW"], env["SESSION_ARCHIVE_LEFT"]), ("ok", "1", "1", "0"))
+        with open(env["SESSION_ARCHIVE_REPORT"], encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["written"]), 1)
+
+    def test_post_command_failure_is_an_error_exit(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(post_command=[sys.executable, "-c", "import sys; sys.exit(2)"])
+        r = self.cli("run", ok=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("post_command exited 2", r.stderr)
+        self.assertEqual(len(self.pairs()), 1, "the pairs are kept; only the hook failed")
+
+    def test_shell_string_hook(self):
+        if not shutil.which("sh"):
+            self.skipTest("no sh")
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(post_command='echo "$SESSION_ARCHIVE_STATUS" > hook.txt')
+        r = subprocess.run([sys.executable, CLI, "run"], env=self.env, cwd=self.tmp, capture_output=True,
+                           text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.tmp, "hook.txt"), encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), "ok")
+
+
 class TestInstall(Base):
     def sh(self, *args):
         bash = shutil.which("bash")

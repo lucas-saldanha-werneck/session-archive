@@ -112,6 +112,79 @@ The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE
 { "out_dir": "~/Documents/claude-archive", "min_turns": 5 }
 ```
 
+**Your settings survive plugin updates.** The config file lives in `~/.config`, outside the plugin folder, so
+`/plugin update` (which replaces the plugin folder) never touches it. The scheduled run from `install.sh`
+reads the same file.
+
+### More config keys (config file only)
+
+Paths may start with `~`; a relative path is taken from the archive folder. `null` or `""` turns a file off.
+
+| Key | What it does | Default |
+|---|---|---|
+| `exclude` | Project folder names to skip. A plain entry matches anywhere in the name; `"^x"` matches names that start with `x` | `["-private-tmp-", "-tmp-", "scratchpad"]` |
+| `state_dir` | Where run history, the lock and `last-run.json` go | `<archive>/.state` |
+| `skipped_file` | The list of sessions skipped on purpose (JSON lines). Point it at a file another tool also keeps | `<state_dir>/skipped.jsonl` |
+| `skipped_hash_chars` | How many hex characters of the transcript's sha256 to record. Reading always compares the prefix, so records with shorter hashes from another tool are understood | `64` |
+| `index_file` | One line per pair | `INDEX.md` |
+| `index_header` | Written once when the index file is created | `# Archived Claude Code sessions` |
+| `index_heading` | Template written before each run's lines (empty = none) | `""` |
+| `index_line` | Template for each pair's line | `- {date} [{base}]({base}.digest.md) - {project} - {user_turns} user turns{continuation_note}` |
+| `index_continuation_note` | What `{continuation_note}` becomes for a continuation pair | `" (continuation)"` |
+| `log_file` | One entry per run | `log.md` |
+| `log_position` | `end` appends; `top` puts the newest entry first, under the file's `# ` title line | `end` |
+| `log_heading` | Template for each run's heading | `## [{now}] archived {count} pair(s)` |
+| `log_item` | Template for each pair under the heading | `- {base}` |
+| `pre_command` | Runs before `run` archives anything. A string goes through the shell; a list runs as is. A non-zero exit stops the run (exit code 4) with nothing written | none |
+| `post_command` | Runs after `run`, with the result in its environment (below). A non-zero exit makes `run` exit 1; the pairs stay | none |
+| `digest` | Field labels, order and wording of the digests (below) | English labels |
+
+Template placeholders: `{now}` (local `YYYY-MM-DD HH:MM`), `{today}`, `{count}`, `{new}`, `{continued}`, and
+`{env[NAME]}` (an environment variable; empty when unset). Per-pair templates also get `{base}`, `{date}`,
+`{project}`, `{user_turns}`, `{lines}`, `{session}`.
+
+Environment of `pre_command` and `post_command`: `SESSION_ARCHIVE_OUT`, `SESSION_ARCHIVE_STATE`; and for
+`post_command` also `SESSION_ARCHIVE_STATUS` (`ok`, `partial`, `fail`), `SESSION_ARCHIVE_WRITTEN`,
+`SESSION_ARCHIVE_NEW`, `SESSION_ARCHIVE_CONTINUED`, `SESSION_ARCHIVE_LEFT` and `SESSION_ARCHIVE_REPORT` (path of
+a JSON file with the run report). Use them to record the run in another tool's ledger, or to refuse to start
+while something else is writing to the same folder.
+
+### Digest format (`digest`)
+
+The digest fields are read back to know what is already archived, so an archive written earlier in a
+different format (another language, a bullet list, another dash) can be adopted by telling the tool its
+labels. Each label can be a string or a list: the first is written, all of them are accepted when reading.
+
+| Key | What it does | Default |
+|---|---|---|
+| `labels` | Label per field: `date`, `session`, `project`, `source`, `raw_copy`, `lines`, `continues`, `user_turns`, `compactions`, `archived`. `null` leaves a field out. `session` and `lines` cannot be empty | English (`Date`, `Session`, `Lines`, ...) |
+| `fields` | Order of the fields in the header (`session` and `lines` are added if missing) | the order above |
+| `field_prefix` | Put before each field, such as `"- "` for a bullet list | `""` |
+| `session_format` | How the session id is written; `{id}` is the id | `` "`{id}`" `` |
+| `range_separator` | Between the two numbers of `lines` | `"-"` |
+| `none` | Written when there were no compactions | `"(none)"` |
+| `headings` | `tldr` and `conversation` section titles | `TL;DR`, `Conversation (text only, tool calls omitted)` |
+| `speakers` | `user` and `assistant` names in `**[NAME]**` | `USER`, `CLAUDE` |
+| `speaker_inline` | `true` puts the text on the same line as the name | `false` |
+
+Reading is lenient whatever the labels: a field may start with a bullet (`- `, `* `), the id may or may not
+be in backticks, and the range may use `-`, `–` or `—`.
+
+Example: adopt an archive whose digests look like `- **Sitzung:** <id>` and `- **Zeilen:** 1–40`:
+
+```json
+{
+  "out_dir": "~/notes/sessions",
+  "digest": {
+    "labels": { "session": ["Sitzung", "Session"], "lines": ["Zeilen", "Lines"] },
+    "field_prefix": "- ", "session_format": "{id}", "range_separator": "–"
+  }
+}
+```
+
+Run `session-archive plan` after changing labels: it writes nothing, and `already archived sessions` should
+match the number of sessions your archive already holds.
+
 To make the archive outlive your machine, put the folder inside something that syncs or is backed up.
 
 ## Requirements
@@ -139,7 +212,8 @@ python3 tests/test_session_archive.py -v
 
 They build a fake `~/.claude/projects` tree in a temp folder (a normal session, a short one, a subagent
 transcript, a live one, a temp-folder project) and check the pairs byte for byte, skips, idempotency,
-continuations, broken-copy recovery, the run limit, config precedence, the lock, the gap warning, and
+continuations, broken-copy recovery, the run limit, config precedence, the lock, the gap warning, every
+config key above (labels read and written, shared skip list, index and log templates, hooks), and
 `install.sh` with a fake `launchctl`.
 
 ## Uninstall
