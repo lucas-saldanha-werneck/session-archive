@@ -404,8 +404,8 @@ class TestConfigOptions(Base):
         self.assertEqual(len(self.pairs()), 1, "the pairs are kept; only the hook failed")
 
     def test_shell_string_hook(self):
-        if not shutil.which("sh"):
-            self.skipTest("no sh")
+        if os.name == "nt":
+            self.skipTest("a string hook runs through cmd.exe on Windows; the list form is tested everywhere")
         self.write_session(S_MAIN, conversation(12, pad=5000))
         self.config(post_command='echo "$SESSION_ARCHIVE_STATUS" > hook.txt')
         r = subprocess.run([sys.executable, CLI, "run"], env=self.env, cwd=self.tmp, capture_output=True,

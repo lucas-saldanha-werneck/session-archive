@@ -135,7 +135,7 @@ Paths may start with `~`; a relative path is taken from the archive folder. `nul
 | `log_position` | `end` appends; `top` puts the newest entry first, under the file's `# ` title line | `end` |
 | `log_heading` | Template for each run's heading | `## [{now}] archived {count} pair(s)` |
 | `log_item` | Template for each pair under the heading | `- {base}` |
-| `pre_command` | Runs before `run` archives anything. A string goes through the shell; a list runs as is. A non-zero exit stops the run (exit code 4) with nothing written | none |
+| `pre_command` | Runs before `run` archives anything. A string goes through the shell (`/bin/sh`; `cmd.exe` on Windows); a list runs as is. A non-zero exit stops the run (exit code 4) with nothing written | none |
 | `post_command` | Runs after `run`, with the result in its environment (below). A non-zero exit makes `run` exit 1; the pairs stay | none |
 | `digest` | Field labels, order and wording of the digests (below) | English labels |
 
