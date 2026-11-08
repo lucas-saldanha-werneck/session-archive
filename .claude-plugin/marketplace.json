@@ -1,0 +1,15 @@
+{
+  "name": "session-archive",
+  "description": "Keep your Claude Code conversations before they are cleaned up.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "session-archive",
+      "source": "./",
+      "description": "A skill and a command that archive each Claude Code session as a digest plus the gzipped transcript, without ever archiving the same lines twice."
+    }
+  ]
+}

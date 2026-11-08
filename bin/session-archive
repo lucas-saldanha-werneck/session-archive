@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""session-archive: keep your Claude Code conversations before Claude Code deletes old transcripts.
+
+For each session transcript (~/.claude/projects/<project>/<session-id>.jsonl) it writes a pair into the
+archive folder:
+  YYYY-MM-DD_<slug>.jsonl.gz   the raw transcript, gzipped
+  YYYY-MM-DD_<slug>.digest.md  a readable digest: metadata + the conversation text without tool calls
+A session that keeps going after it was archived gets a continuation pair (<slug>-cont-N) holding only the
+new lines. Nothing is archived twice: what is already archived is read back from the digests themselves
+(their "Session" and "Lines" fields, checked against the .gz line count), so the archive is its own watermark.
+
+Commands:
+  plan     show what a run would do (new sessions, continuations, skips with reasons). Writes nothing.
+  run      archive. --limit N (default 40, oldest first), --dry-run
+  verify   check every pair: the .gz opens and holds the line count its digest promises
+  status   last run, counts, and a warning when the last run is older than Claude Code's retention
+
+Common options: --out DIR, --projects DIR, --min-turns N, --min-kb N, --live-minutes N, --json
+
+Config (each optional; flags win over env, env wins over the config file):
+  SESSION_ARCHIVE_DIR       archive folder (default ~/claude-session-archive)
+  SESSION_ARCHIVE_PROJECTS  transcripts folder (default $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects)
+  SESSION_ARCHIVE_CONFIG    config file (default ~/.config/session-archive/config.json) with keys
+                            out_dir, projects_dir, min_turns, min_kb, live_minutes, exclude (list of substrings)
+"""
+import argparse
+import datetime as dt
+import gzip
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import unicodedata
+
+VERSION = "0.1.0"
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+SESSION_FIELD = re.compile(r"^\*\*Session:\*\*\s*`?([0-9a-f-]{36})`?", re.M)
+LINES_FIELD = re.compile(r"^\*\*Lines:\*\*\s*(\d+)\s*[-–]\s*(\d+)", re.M)
+TLDR_PLACEHOLDER = "<!-- TLDR: not written yet -->"
+DEFAULT_EXCLUDE = ["-private-tmp-", "-tmp-", "scratchpad"]
+
+
+# ---------------------------------------------------------------- config
+def load_config(args):
+    home = os.path.expanduser("~")
+    cfg_path = os.environ.get("SESSION_ARCHIVE_CONFIG") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "session-archive", "config.json")
+    cfg = {}
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            die(f"config file {cfg_path} is not valid JSON: {e}")
+    claude_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
+
+    def pick(flag, env, key, default):
+        if flag is not None:
+            return flag
+        if env and os.environ.get(env):
+            return os.environ[env]
+        if key in cfg:
+            return cfg[key]
+        return default
+
+    c = {
+        "out": os.path.expanduser(str(pick(args.out, "SESSION_ARCHIVE_DIR", "out_dir",
+                                           os.path.join(home, "claude-session-archive")))),
+        "projects": os.path.expanduser(str(pick(args.projects, "SESSION_ARCHIVE_PROJECTS", "projects_dir",
+                                                os.path.join(claude_dir, "projects")))),
+        "min_turns": int(pick(args.min_turns, None, "min_turns", 10)),
+        "min_kb": float(pick(args.min_kb, None, "min_kb", 50)),
+        "live_minutes": float(pick(args.live_minutes, None, "live_minutes", 2)),
+        "exclude": list(cfg.get("exclude", DEFAULT_EXCLUDE)),
+        "claude_dir": claude_dir,
+    }
+    c["state"] = os.path.join(c["out"], ".state")
+    return c
+
+
+def die(msg, code=1):
+    print(f"session-archive: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------- helpers
+def now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def iso(t):
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(s):
+    try:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def read_lines(path):
+    """Raw lines (bytes, newline kept). Line numbers in digests are 1-based indexes into this list."""
+    with open(path, "rb") as f:
+        return f.readlines()
+
+
+def gz_line_count(path):
+    try:
+        with gzip.open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return None
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def write_atomic(path, data, mode="w"):
+    tmp = path + ".tmp"
+    if mode == "w":
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(data)
+    else:
+        with open(tmp, "wb") as f:
+            f.write(data)
+    os.replace(tmp, path)
+
+
+def append_text(path, text):
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def read_jsonl(path):
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                die(f"{path} line {n} is corrupt; fix or delete that line")
+    return out
+
+
+def slugify(text, max_words=7, max_len=60):
+    t = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
+    words = re.findall(r"[a-z0-9]+", t)
+    slug = "-".join(words[:max_words])[:max_len].strip("-")
+    return slug or "session"
+
+
+# ---------------------------------------------------------------- transcript parsing
+def parse_entries(raw_lines):
+    entries = []
+    for b in raw_lines:
+        try:
+            entries.append(json.loads(b))
+        except Exception:
+            entries.append(None)
+    return entries
+
+
+def text_of(content):
+    """(text, tool_calls) from a message content (string or list of blocks)."""
+    if isinstance(content, str):
+        return content, 0
+    texts, tools = [], 0
+    for blk in content or []:
+        if not isinstance(blk, dict):
+            continue
+        t = blk.get("type")
+        if t == "text":
+            texts.append(blk.get("text", ""))
+        elif t in ("tool_use", "tool_result", "server_tool_use"):
+            tools += 1
+    return "\n\n".join(x for x in texts if x.strip()), tools
+
+
+def summarize(entries):
+    """Facts about a session: first timestamp, cwd, title, user turns, sidechain share, compactions."""
+    info = {"first_ts": None, "cwd": None, "title": None, "first_user": None,
+            "user_turns": 0, "msgs": 0, "sidechain": 0, "compactions": 0}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        typ = e.get("type")
+        if typ in ("custom-title", "ai-title") or "customTitle" in e:
+            info["title"] = e.get("customTitle") or e.get("aiTitle") or e.get("title") or info["title"]
+        elif typ == "summary" and e.get("summary") and not info["title"]:
+            info["title"] = e["summary"]
+        if typ not in ("user", "assistant"):
+            continue
+        info["msgs"] += 1
+        if e.get("isSidechain"):
+            info["sidechain"] += 1
+        if not info["first_ts"] and e.get("timestamp"):
+            info["first_ts"] = e["timestamp"]
+        if not info["cwd"] and e.get("cwd"):
+            info["cwd"] = e["cwd"]
+        if e.get("isCompactSummary"):
+            info["compactions"] += 1
+            continue
+        if typ == "user" and not e.get("isMeta") and not e.get("isSidechain"):
+            text, _ = text_of((e.get("message") or {}).get("content"))
+            if text.strip() and not text.lstrip().startswith("<"):
+                info["user_turns"] += 1
+                if info["first_user"] is None:
+                    info["first_user"] = text
+    return info
+
+
+def distill(entries, start=1):
+    """Markdown conversation: user and assistant text only; tool calls are cut and the cut is marked."""
+    out, pending_tools = [], 0
+    for n, e in enumerate(entries, start):
+        if not isinstance(e, dict) or e.get("type") not in ("user", "assistant") or e.get("isSidechain"):
+            continue
+        msg = e.get("message") or {}
+        text, tools = text_of(msg.get("content"))
+        pending_tools += tools
+        if e.get("isCompactSummary"):
+            out.append(f"_[line {n}: the conversation was compacted here; summary omitted]_")
+            continue
+        if not text.strip() or e.get("isMeta"):
+            continue
+        if pending_tools:
+            out.append(f"_[{pending_tools} tool call(s) and result(s) omitted]_")
+            pending_tools = 0
+        who = "USER" if e["type"] == "user" else "CLAUDE"
+        out.append(f"**[{who}]**\n\n{text.strip()}")
+    if pending_tools:
+        out.append(f"_[{pending_tools} tool call(s) and result(s) omitted]_")
+    return "\n\n".join(out) if out else "_(no conversation text in these lines)_"
+
+
+def local_date(ts, fallback_path):
+    t = parse_ts(ts) if ts else None
+    if t is None:
+        t = dt.datetime.fromtimestamp(os.path.getmtime(fallback_path), dt.timezone.utc)
+    return t.astimezone().strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------- archive state (the watermark)
+def archived_sessions(out_dir):
+    """session id -> {digests, lines (contiguous coverage from line 1), broken[]}."""
+    res = {}
+    if not os.path.isdir(out_dir):
+        return res
+    for name in sorted(os.listdir(out_dir)):
+        if not name.endswith(".digest.md"):
+            continue
+        d = os.path.join(out_dir, name)
+        with open(d, encoding="utf-8", errors="ignore") as f:
+            head = f.read(4000)
+        m = SESSION_FIELD.search(head)
+        if not m:
+            continue
+        sid = m.group(1)
+        gz = d[: -len(".digest.md")] + ".jsonl.gz"
+        n = gz_line_count(gz) if os.path.exists(gz) else None
+        lm = LINES_FIELD.search(head)
+        e = res.setdefault(sid, {"digests": [], "ranges": [], "broken": [], "lines": 0})
+        e["digests"].append(d)
+        if lm:
+            a, b = int(lm.group(1)), int(lm.group(2))
+            ok = n is not None and n == b - a + 1
+        else:
+            a, b = 1, n or 0
+            ok = bool(n)
+        if ok:
+            e["ranges"].append((a, b))
+        else:
+            why = "missing" if not os.path.exists(gz) else ("corrupt gzip" if n is None else f"{n} lines, expected {b - a + 1}")
+            e["broken"].append(f"{os.path.basename(gz)} ({why})")
+    for e in res.values():
+        covered = 0
+        for a, b in sorted(e["ranges"]):
+            if a > covered + 1:
+                e["broken"].append(f"gap at lines {covered + 1}-{a - 1}")
+                break
+            covered = max(covered, b)
+        e["lines"] = covered
+    return res
+
+
+def session_files(c):
+    if not os.path.isdir(c["projects"]):
+        return []
+    files = []
+    for proj in sorted(os.listdir(c["projects"])):
+        pdir = os.path.join(c["projects"], proj)
+        if not os.path.isdir(pdir) or any(x in proj for x in c["exclude"]):
+            continue
+        for name in sorted(os.listdir(pdir)):
+            if name.endswith(".jsonl") and UUID_RE.match(name[:-6]):
+                files.append(os.path.join(pdir, name))
+    return files
+
+
+def plan(c):
+    archived = archived_sessions(c["out"])
+    skipped = {r["session"]: r for r in read_jsonl(os.path.join(c["state"], "skipped.jsonl"))}
+    new, cont, skips = [], [], []
+    live_cut = time.time() - c["live_minutes"] * 60
+    for f in session_files(c):
+        sid = os.path.basename(f)[:-6]
+        size = os.path.getsize(f)
+        mtime = os.path.getmtime(f)
+        if mtime > live_cut:
+            skips.append({"session": sid, "jsonl": f, "reason": "live", "record": False})
+            continue
+        a = archived.get(sid)
+        if a and a["lines"] > 0:
+            cur = len(read_lines(f))
+            if cur > a["lines"]:
+                cont.append({"session": sid, "jsonl": f, "from": a["lines"] + 1, "to": cur, "digests": a["digests"]})
+            continue
+        prev = skipped.get(sid)
+        if prev and prev.get("size") == size and (prev.get("mtime") == mtime or prev.get("sha256") == sha256(f)):
+            continue  # skipped on purpose before and unchanged since
+        entries = parse_entries(read_lines(f))
+        info = summarize(entries)
+        reason = None
+        if info["msgs"] and info["sidechain"] * 2 > info["msgs"]:
+            reason = "subagent"
+        elif info["user_turns"] < c["min_turns"] or size < c["min_kb"] * 1024:
+            reason = "trivial"
+        if reason:
+            skips.append({"session": sid, "jsonl": f, "reason": reason, "record": True, "size": size,
+                          "user_turns": info["user_turns"]})
+            continue
+        new.append({"session": sid, "jsonl": f, "mtime": mtime, "size": size, "rearchive": bool(a)})
+    new.sort(key=lambda x: x["mtime"])
+    broken = {sid: e["broken"] for sid, e in archived.items() if e["broken"]}
+    return {"new": new, "continued": cont, "skipped": skips, "broken": broken, "archived": len(archived)}
+
+
+# ---------------------------------------------------------------- writing pairs
+def unique_base(out_dir, base):
+    cand, i = base, 2
+    while os.path.exists(os.path.join(out_dir, cand + ".digest.md")) or os.path.exists(os.path.join(out_dir, cand + ".jsonl.gz")):
+        cand = f"{base}-{i}"
+        i += 1
+    return cand
+
+
+def write_pair(c, item, cont=False):
+    f = item["jsonl"]
+    raw = read_lines(f)
+    if cont:
+        a, b = item["from"], item["to"]
+        prev = sorted(item["digests"])[-1]
+        root = os.path.basename(sorted(item["digests"])[0])[: -len(".digest.md")]
+        root = re.sub(r"-cont-\d+$", "", root)
+        base = unique_base(c["out"], f"{root}-cont-{len(item['digests'])}")
+    else:
+        a, b = 1, len(raw)
+        prev = None
+    chunk = raw[a - 1:b]
+    all_entries = parse_entries(raw)
+    info = summarize(all_entries)
+    part = parse_entries(chunk)
+    part_info = summarize(part)
+    if not cont:
+        title = info["title"] or (info["first_user"] or "")[:200]
+        base = unique_base(c["out"], f"{local_date(info['first_ts'], f)}_{slugify(title) if title else item['session'][:8]}")
+    gz_path = os.path.join(c["out"], base + ".jsonl.gz")
+    md_path = os.path.join(c["out"], base + ".digest.md")
+    write_atomic(gz_path, gzip.compress(b"".join(chunk)), mode="wb")
+    lines = [
+        f"# {base.split('_', 1)[-1]}",
+        "",
+        f"**Date:** {local_date(info['first_ts'], f)}",
+        f"**Session:** `{item['session']}`",
+        f"**Project:** {info['cwd'] or os.path.basename(os.path.dirname(f))}",
+        f"**Source:** {f}",
+        f"**Raw copy:** {os.path.basename(gz_path)}",
+        f"**Lines:** {a}-{b}",
+    ]
+    if prev:
+        lines.append(f"**Continues:** {os.path.basename(prev)}")
+    lines += [
+        f"**User turns:** {part_info['user_turns']}",
+        f"**Compactions:** {part_info['compactions'] or '(none)'}",
+        f"**Archived:** {iso(now())} by session-archive {VERSION}",
+        "",
+        "## TL;DR",
+        "",
+        TLDR_PLACEHOLDER,
+        "",
+        "## Conversation (text only, tool calls omitted)",
+        "",
+        distill(part, start=a),
+        "",
+    ]
+    write_atomic(md_path, "\n".join(lines))
+    # read back from disk before counting it as archived
+    n = gz_line_count(gz_path)
+    with open(md_path, encoding="utf-8") as fh:
+        head = fh.read(4000)
+    if n != b - a + 1 or f"`{item['session']}`" not in head:
+        raise RuntimeError(f"verification failed for {base}: gz lines {n}, expected {b - a + 1}")
+    return {"base": base, "session": item["session"], "lines": f"{a}-{b}", "user_turns": part_info["user_turns"],
+            "project": info["cwd"] or "", "date": local_date(info["first_ts"], f), "continuation": cont}
+
+
+# ---------------------------------------------------------------- lock
+class Lock:
+    def __init__(self, state):
+        self.path = os.path.join(state, "lock")
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        if os.path.exists(self.path) and time.time() - os.path.getmtime(self.path) > 3600:
+            os.remove(self.path)  # stale: a crashed run more than an hour ago
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            die(f"another run holds {self.path}; wait for it, or delete the file if no run is active", 3)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return self
+
+    def __exit__(self, *a):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- commands
+def retention_days(c):
+    try:
+        with open(os.path.join(c["claude_dir"], "settings.json"), encoding="utf-8") as f:
+            return int(json.load(f).get("cleanupPeriodDays", 30))
+    except Exception:
+        return 30
+
+
+def print_plan(p, as_json):
+    if as_json:
+        print(json.dumps(p, indent=1, default=str))
+        return
+    print(f"already archived sessions: {p['archived']}")
+    print(f"new: {len(p['new'])}")
+    for x in p["new"]:
+        print(f"  {x['session']}  {x['size'] // 1024} KB{'  (re-archive: broken copy)' if x['rearchive'] else ''}")
+    print(f"continued since last archive: {len(p['continued'])}")
+    for x in p["continued"]:
+        print(f"  {x['session']}  lines {x['from']}-{x['to']}")
+    print(f"skipped: {len(p['skipped'])}")
+    for x in p["skipped"]:
+        print(f"  {x['session']}  {x['reason']}")
+    for sid, why in p["broken"].items():
+        print(f"WARNING broken archive for {sid}: {'; '.join(why)}")
+
+
+def cmd_plan(c, a):
+    print_plan(plan(c), a.json)
+
+
+def cmd_run(c, a):
+    os.makedirs(c["out"], exist_ok=True)
+    with Lock(c["state"]):
+        p = plan(c)
+        todo_new = p["new"][: a.limit]
+        room = max(0, a.limit - len(todo_new))
+        todo_cont = p["continued"][:room]
+        left = len(p["new"]) - len(todo_new) + len(p["continued"]) - len(todo_cont)
+        if a.dry_run:
+            print_plan(p, a.json)
+            print(f"dry run: would write {len(todo_new) + len(todo_cont)} pair(s); {left} left for a later run")
+            return
+        made, failed = [], []
+        for item, cont in [(x, False) for x in todo_new] + [(x, True) for x in todo_cont]:
+            try:
+                made.append(write_pair(c, item, cont))
+            except Exception as e:
+                failed.append(f"{item['session']}: {e}")
+        for s in p["skipped"]:
+            if s.get("record"):
+                append_text(os.path.join(c["state"], "skipped.jsonl"), json.dumps(
+                    {"session": s["session"], "reason": s["reason"], "size": s["size"], "sha256": sha256(s["jsonl"]),
+                     "mtime": os.path.getmtime(s["jsonl"]),
+                     "at": iso(now())}) + "\n")
+        if made:
+            idx = os.path.join(c["out"], "INDEX.md")
+            if not os.path.exists(idx):
+                append_text(idx, "# Archived Claude Code sessions\n\n")
+            append_text(idx, "".join(
+                f"- {m['date']} [{m['base']}]({m['base']}.digest.md) - {m['project']} - {m['user_turns']} user turns"
+                f"{' (continuation)' if m['continuation'] else ''}\n" for m in made))
+            append_text(os.path.join(c["out"], "log.md"),
+                        f"## [{now().astimezone().strftime('%Y-%m-%d %H:%M')}] archived {len(made)} pair(s)\n\n"
+                        + "".join(f"- {m['base']}\n" for m in made) + "\n")
+        status = "ok" if not failed and left == 0 else ("partial" if made or left else "fail")
+        if failed and not made:
+            status = "fail"
+        append_text(os.path.join(c["state"], "runs.jsonl"), json.dumps(
+            {"at": iso(now()), "status": status, "new": len([m for m in made if not m["continuation"]]),
+             "continued": len([m for m in made if m["continuation"]]), "skipped": len(p["skipped"]),
+             "left": left, "failed": failed}) + "\n")
+        report = {"status": status, "written": [m["base"] for m in made], "skipped": [
+            {"session": s["session"], "reason": s["reason"]} for s in p["skipped"]], "failed": failed, "left": left,
+            "out": c["out"], "broken": p["broken"]}
+        if a.json:
+            print(json.dumps(report, indent=1))
+        else:
+            print(f"{status}: wrote {len(made)} pair(s) to {c['out']}")
+            for m in made:
+                print(f"  + {m['base']}  (lines {m['lines']})")
+            for s in p["skipped"]:
+                print(f"  - skipped {s['session']}: {s['reason']}")
+            for x in failed:
+                print(f"  ! failed {x}")
+            if left:
+                print(f"{left} session(s) left over the --limit; run again")
+            for sid, why in p["broken"].items():
+                print(f"WARNING broken archive for {sid}: {'; '.join(why)}")
+            if made:
+                print(f"next: fill the TL;DR in each new digest (look for '{TLDR_PLACEHOLDER}')")
+        if status == "fail":
+            sys.exit(1)
+
+
+def cmd_verify(c, a):
+    arch = archived_sessions(c["out"])
+    bad = {sid: e["broken"] for sid, e in arch.items() if e["broken"]}
+    pairs = sum(len(e["digests"]) for e in arch.values())
+    if a.json:
+        print(json.dumps({"sessions": len(arch), "pairs": pairs, "broken": bad}, indent=1))
+    else:
+        print(f"{pairs} pair(s) for {len(arch)} session(s) in {c['out']}")
+        for sid, why in bad.items():
+            print(f"BROKEN {sid}: {'; '.join(why)}")
+        if not bad:
+            print("all pairs OK")
+    sys.exit(1 if bad else 0)
+
+
+def cmd_status(c, a):
+    runs = read_jsonl(os.path.join(c["state"], "runs.jsonl"))
+    oks = [r for r in runs if r.get("status") == "ok"]
+    last = runs[-1] if runs else None
+    last_ok = parse_ts(oks[-1]["at"]) if oks else None
+    ret = retention_days(c)
+    files = session_files(c)
+    oldest = min((os.path.getmtime(f) for f in files), default=None)
+    warn = []
+    if last_ok is None:
+        warn.append("no successful run yet")
+    elif now() - last_ok > dt.timedelta(days=max(1, ret - 3)):
+        warn.append(f"GAP RISK: last ok run {iso(last_ok)}; Claude Code deletes transcripts older than {ret} days "
+                    "(cleanupPeriodDays in settings.json)")
+    out = {"out": c["out"], "projects": c["projects"], "last_run": last, "last_ok": iso(last_ok) if last_ok else None,
+           "retention_days": ret, "transcripts": len(files),
+           "oldest_transcript": iso(dt.datetime.fromtimestamp(oldest, dt.timezone.utc)) if oldest else None,
+           "warnings": warn}
+    if a.json:
+        print(json.dumps(out, indent=1, default=str))
+    else:
+        for k, v in out.items():
+            if k != "warnings":
+                print(f"{k}: {v}")
+        for w in warn:
+            print(f"WARNING {w}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="session-archive", description=__doc__.split("\n")[0])
+    ap.add_argument("--version", action="version", version=VERSION)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--out")
+    common.add_argument("--projects")
+    common.add_argument("--min-turns", type=int)
+    common.add_argument("--min-kb", type=float)
+    common.add_argument("--live-minutes", type=float)
+    common.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("plan", parents=[common], help="show what a run would do")
+    r = sub.add_parser("run", parents=[common], help="archive new and continued sessions")
+    r.add_argument("--limit", type=int, default=40)
+    r.add_argument("--dry-run", action="store_true")
+    sub.add_parser("verify", parents=[common], help="check every archived pair")
+    sub.add_parser("status", parents=[common], help="last run and gap warning")
+    a = ap.parse_args(argv)
+    c = load_config(a)
+    {"plan": cmd_plan, "run": cmd_run, "verify": cmd_verify, "status": cmd_status}[a.cmd](c, a)
+
+
+if __name__ == "__main__":
+    main()

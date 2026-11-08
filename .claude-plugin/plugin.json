@@ -1,0 +1,13 @@
+{
+  "name": "session-archive",
+  "version": "0.1.0",
+  "description": "Archive your Claude Code conversations (a readable digest + the gzipped transcript per session) before Claude Code deletes old transcripts. Idempotent: the archive is its own watermark, and sessions that continue get continuation pairs.",
+  "author": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "homepage": "https://github.com/lucas-saldanha-werneck/session-archive",
+  "repository": "https://github.com/lucas-saldanha-werneck/session-archive",
+  "license": "MIT",
+  "keywords": ["skill", "archive", "backup", "transcripts", "sessions"]
+}
