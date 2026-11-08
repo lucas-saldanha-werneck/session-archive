@@ -147,6 +147,8 @@ def seed_config():
     """Create the config file from the starter if nothing is there. Never overwrites or changes an existing
     file (open mode "x"). Returns ("created" | "kept" | "failed", path, error)."""
     path = config_path()
+    if not os.path.isabs(path):  # it would land in whatever folder the command runs in
+        return "failed", path, ValueError("not an absolute path")
     try:
         if os.path.lexists(path):
             return "kept", path, None

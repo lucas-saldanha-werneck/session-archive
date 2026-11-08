@@ -578,6 +578,15 @@ class TestSeed(Base):
         self.write_session(S_MAIN, conversation(12, pad=5000))
         self.assertEqual(len(self.run_json()["written"]), 1, "run still works without a config file")
 
+    def test_relative_config_path_is_not_seeded(self):
+        self.env["SESSION_ARCHIVE_CONFIG"] = os.path.join("rel", "config.json")
+        cwd = os.path.join(self.tmp, "cwd")
+        os.makedirs(cwd)
+        r = subprocess.run([sys.executable, CLI, "seed", "--quiet"], env=self.env, cwd=cwd, capture_output=True,
+                           text=True, encoding="utf-8")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(os.listdir(cwd), [], "nothing written into the current folder")
+
     def test_read_only_folder_never_crashes(self):
         ro = os.path.join(self.tmp, "ro")
         os.makedirs(ro)
