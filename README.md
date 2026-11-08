@@ -118,16 +118,19 @@ The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE
 The config file is `~/.config/session-archive/config.json` (or `$XDG_CONFIG_HOME/session-archive/config.json`,
 or the file in `$SESSION_ARCHIVE_CONFIG`). The plugin creates it by itself the first time it runs (a
 `SessionStart` hook; outside the plugin, the first `session-archive run`, or `session-archive seed`), with every
-key at its default and a short note per key under `_doc`: the same content as
-[`config.example.json`](config.example.json). That file behaves exactly like having no config. It lives outside
+key set to `null` and a short note per key under `_doc` that shows its current default: the same content as
+[`config.example.json`](config.example.json). `null` means "use the built-in default", so that file behaves
+exactly like having no config, and a later version that changes a default reaches you too. Replace a `null` to
+change that setting. It lives outside
 the plugin folder, so `/plugin update` never touches it, and the tool never overwrites or changes a config file
 that is already there. The scheduled run from `install.sh` reads the same file.
 
 ### More config keys (config file only)
 
 Paths may start with `~`; a relative path is taken from the archive folder (`out_dir` and `projects_dir`: from the
-folder the command runs in). `null` or `""` turns `index_file`
-and `log_file` off; for `out_dir`, `projects_dir`, `state_dir` and `skipped_file`, `null` means the default.
+folder the command runs in). Any key set to `null` is the same as leaving it out: the built-in default. `""`
+turns `index_file`, `log_file`, `index_header` and `index_heading` off. Inside `digest.labels`, `null` still means
+"leave this field out".
 
 | Key | What it does | Default |
 |---|---|---|

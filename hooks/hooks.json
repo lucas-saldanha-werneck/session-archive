@@ -1,5 +1,5 @@
 {
-  "description": "Creates ~/.config/session-archive/config.json (every key at its default) on first run. Silent; never overwrites a file. Falls back to `python` only when python3 fails.",
+  "description": "Creates ~/.config/session-archive/config.json (every key null = the built-in default) on first run. Silent; never overwrites a file. Falls back to `python` only when python3 fails.",
   "hooks": {
     "SessionStart": [
       {

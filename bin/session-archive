@@ -14,7 +14,7 @@ Commands:
   run      archive. --limit N (default 40, oldest first), --dry-run
   verify   check every pair: the .gz opens and holds the line count its digest promises
   status   last run, counts, and a warning when the last run is older than Claude Code's retention
-  seed     create the config file with every default if it is missing (--quiet, --print)
+  seed     create the config file (every key null = the default) if it is missing (--quiet, --print)
 
 Common options: --out DIR, --projects DIR, --min-turns N, --min-kb N, --live-minutes N, --json
 
@@ -27,7 +27,7 @@ Config (each optional; flags win over env, env wins over the config file):
                             index_file, index_header, index_line, index_continuation_note, log_file, log_heading,
                             log_item, pre_command, post_command, digest (labels, field order, headings, speakers).
                             See the README for each key. The file lives outside the plugin, so it survives updates.
-                            The first run creates it with every key at its default (also `session-archive seed`);
+                            The first run creates it with every key null = default (also `session-archive seed`);
                             an existing file is never overwritten.
 """
 import argparse
@@ -68,6 +68,24 @@ DEFAULT_LOG_HEADING = "## [{now}] archived {count} pair(s)"
 DEFAULT_LOG_ITEM = "- {base}"
 DEFAULT_INDEX_HEADER = "# Archived Claude Code sessions\n\n"
 DEFAULT_CONTINUATION_NOTE = " (continuation)"
+# Built-in defaults of the plain config keys, read when a key is absent or null. The seeded config file holds
+# null for every key, so a later release that changes one of these reaches every user who never set it.
+DEFAULTS = {
+    "min_turns": 10,
+    "min_kb": 50,
+    "live_minutes": 2,
+    "exclude": DEFAULT_EXCLUDE,
+    "skipped_hash_chars": 64,
+    "index_file": "INDEX.md",
+    "index_header": DEFAULT_INDEX_HEADER,
+    "index_heading": "",
+    "index_line": DEFAULT_INDEX_LINE,
+    "index_continuation_note": DEFAULT_CONTINUATION_NOTE,
+    "log_file": "log.md",
+    "log_position": "end",
+    "log_heading": DEFAULT_LOG_HEADING,
+    "log_item": DEFAULT_LOG_ITEM,
+}
 
 
 # ---------------------------------------------------------------- config
@@ -82,64 +100,48 @@ def config_path():
 
 STARTER_DOC = {
     "about": "session-archive settings. Created by session-archive on its first run; plugin updates never touch "
-             "this file. Every key holds its default, so this file behaves exactly like having none. Flags win "
-             "over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this "
-             "file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is "
-             "taken from the archive folder (out_dir and projects_dir: from the folder the command runs in).",
-    "out_dir": "Archive folder. null = ~/claude-session-archive.",
-    "projects_dir": "Claude Code transcripts folder. null = $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
-    "min_turns": "Sessions with fewer user turns are skipped as trivial.",
-    "min_kb": "Sessions smaller than this many KB are skipped as trivial.",
-    "live_minutes": "A transcript written in the last N minutes is live (usually this session) and waits.",
-    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x.",
-    "state_dir": "Run history, lock and last-run.json. null = <archive>/.state.",
-    "skipped_file": "Sessions skipped on purpose (JSON lines). null = <state_dir>/skipped.jsonl.",
-    "skipped_hash_chars": "Hex characters of the transcript sha256 to record.",
-    "index_file": "One line per pair. null or \"\" = no index.",
-    "index_header": "Written once when the index file is created. null = nothing.",
-    "index_heading": "Template written before each run's index lines. \"\" = none.",
-    "index_line": "Template for each pair's index line.",
-    "index_continuation_note": "What {continuation_note} becomes for a continuation pair.",
-    "log_file": "One entry per run. null or \"\" = no log.",
-    "log_position": "\"end\" appends; \"top\" puts the newest entry first, under the # title line.",
-    "log_heading": "Template for each run's log heading.",
-    "log_item": "Template for each pair under the log heading.",
+             "this file. Every key is null, which means \"use the built-in default\" (shown in its note), so this "
+             "file behaves exactly like having none and follows the defaults of later versions. Replace a null to "
+             "change that setting. Flags win over environment variables (SESSION_ARCHIVE_DIR, "
+             "SESSION_ARCHIVE_PROJECTS), which win over this file. Keys starting with _ are notes and are ignored. "
+             "Paths may start with ~; a relative path is taken from the archive folder (out_dir and projects_dir: "
+             "from the folder the command runs in).",
+    "out_dir": "Archive folder. Default: ~/claude-session-archive.",
+    "projects_dir": "Claude Code transcripts folder. Default: $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
+    "min_turns": "Sessions with fewer user turns are skipped as trivial. Default: {min_turns}.",
+    "min_kb": "Sessions smaller than this many KB are skipped as trivial. Default: {min_kb}.",
+    "live_minutes": "A transcript written in the last N minutes is live (usually this session) and waits. "
+                    "Default: {live_minutes}.",
+    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x. "
+               "Default: {exclude}.",
+    "state_dir": "Run history, lock and last-run.json. Default: <archive>/.state.",
+    "skipped_file": "Sessions skipped on purpose (JSON lines). Default: <state_dir>/skipped.jsonl.",
+    "skipped_hash_chars": "Hex characters of the transcript sha256 to record. Default: {skipped_hash_chars}.",
+    "index_file": "One line per pair. \"\" = no index. Default: {index_file}.",
+    "index_header": "Written once when the index file is created. \"\" = nothing. Default: {index_header}.",
+    "index_heading": "Template written before each run's index lines. \"\" = none. Default: {index_heading}.",
+    "index_line": "Template for each pair's index line. Default: {index_line}.",
+    "index_continuation_note": "What {{continuation_note}} becomes for a continuation pair. "
+                               "Default: {index_continuation_note}.",
+    "log_file": "One entry per run. \"\" = no log. Default: {log_file}.",
+    "log_position": "\"end\" appends; \"top\" puts the newest entry first, under the # title line. "
+                    "Default: {log_position}.",
+    "log_heading": "Template for each run's log heading. Default: {log_heading}.",
+    "log_item": "Template for each pair under the log heading. Default: {log_item}.",
     "pre_command": "Runs before run archives anything (a string goes through the shell; a list runs as is). "
-                   "Non-zero exit stops the run. null = none.",
-    "post_command": "Runs after run, with the result in its environment. null = none.",
-    "digest": "Digest labels (string, list of accepted labels, or null to leave a field out), field order, "
-              "field_prefix, session_format ({id}), range_separator, none, headings, speakers, speaker_inline. "
-              "The README has the details.",
+                   "Non-zero exit stops the run. Default: none.",
+    "post_command": "Runs after run, with the result in its environment. Default: none.",
+    "digest": "Digest labels (string, list of accepted labels, or null inside labels to leave a field out), field "
+              "order, field_prefix, session_format ({{id}}), range_separator, none, headings, speakers, "
+              "speaker_inline. Keys you leave out keep their defaults. The README has the details.",
 }
 
 
 def starter_config():
-    """The starter config.json: every key at its default, with a note per key under _doc."""
-    digest = json.loads(json.dumps(DEFAULT_DIGEST))
-    return {
-        "_doc": STARTER_DOC,
-        "out_dir": None,
-        "projects_dir": None,
-        "min_turns": 10,
-        "min_kb": 50,
-        "live_minutes": 2,
-        "exclude": list(DEFAULT_EXCLUDE),
-        "state_dir": None,
-        "skipped_file": None,
-        "skipped_hash_chars": 64,
-        "index_file": "INDEX.md",
-        "index_header": DEFAULT_INDEX_HEADER,
-        "index_heading": "",
-        "index_line": DEFAULT_INDEX_LINE,
-        "index_continuation_note": DEFAULT_CONTINUATION_NOTE,
-        "log_file": "log.md",
-        "log_position": "end",
-        "log_heading": DEFAULT_LOG_HEADING,
-        "log_item": DEFAULT_LOG_ITEM,
-        "pre_command": None,
-        "post_command": None,
-        "digest": digest,
-    }
+    """The starter config.json: every key null (= the built-in default), the default shown in its _doc note."""
+    shown = {k: json.dumps(v, ensure_ascii=False) for k, v in DEFAULTS.items()}
+    doc = {k: v if k == "about" else v.format(**shown) for k, v in STARTER_DOC.items()}
+    return {"_doc": doc, **{k: None for k in STARTER_DOC if k != "about"}}
 
 
 def starter_text():
@@ -234,6 +236,8 @@ def load_config(args):
             die(f"config file {cfg_path} is not valid JSON: {e}")
         if not isinstance(cfg, dict):
             die(f"config file {cfg_path} must hold a JSON object")
+        cfg = {k: v for k, v in cfg.items() if v is not None}  # null = the key is absent = the default
+    D = DEFAULTS
     claude_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
 
     def pick(flag, env, key, default):
@@ -241,14 +245,14 @@ def load_config(args):
             return flag
         if env and os.environ.get(env):
             return os.environ[env]
-        if cfg.get(key) is not None:  # null = the default
+        if key in cfg:
             return cfg[key]
         return default
 
     for key in ("out_dir", "projects_dir", "state_dir", "skipped_file", "index_file", "log_file"):
         if cfg.get(key) is not None and not isinstance(cfg[key], str):
             die(f"{key} must be a path string or null; got {json.dumps(cfg[key])}")
-    exclude = cfg.get("exclude", DEFAULT_EXCLUDE)
+    exclude = cfg.get("exclude", D["exclude"])
     if not isinstance(exclude, list) or not all(isinstance(x, str) and x and x != "^" for x in exclude):
         die(f"exclude must be a list of non-empty strings (\"^x\" = starts with x; \"^\" alone is not allowed); "
             f"got {json.dumps(exclude)}")
@@ -257,31 +261,32 @@ def load_config(args):
                                            os.path.join(home, "claude-session-archive")))),
         "projects": os.path.expanduser(str(pick(args.projects, "SESSION_ARCHIVE_PROJECTS", "projects_dir",
                                                 os.path.join(claude_dir, "projects")))),
-        "min_turns": _number(pick(args.min_turns, None, "min_turns", 10), "min_turns", int),
-        "min_kb": _number(pick(args.min_kb, None, "min_kb", 50), "min_kb", float),
-        "live_minutes": _number(pick(args.live_minutes, None, "live_minutes", 2), "live_minutes", float),
+        "min_turns": _number(pick(args.min_turns, None, "min_turns", D["min_turns"]), "min_turns", int),
+        "min_kb": _number(pick(args.min_kb, None, "min_kb", D["min_kb"]), "min_kb", float),
+        "live_minutes": _number(pick(args.live_minutes, None, "live_minutes", D["live_minutes"]), "live_minutes",
+                                float),
         "exclude": list(exclude),
         "claude_dir": claude_dir,
     }
     c["state"] = expand(cfg.get("state_dir"), c["out"]) or os.path.join(c["out"], ".state")
     c["skipped_file"] = expand(cfg.get("skipped_file"), c["out"]) or os.path.join(c["state"], "skipped.jsonl")
-    hc = cfg.get("skipped_hash_chars", 64)
+    hc = cfg.get("skipped_hash_chars", D["skipped_hash_chars"])
     if isinstance(hc, float) and hc.is_integer():
         hc = int(hc)
     if not isinstance(hc, int) or isinstance(hc, bool) or hc <= 0:
         die(f"skipped_hash_chars must be a positive whole number; got {json.dumps(hc)}")
     c["skipped_hash_chars"] = hc
-    c["index_file"] = expand(cfg.get("index_file", "INDEX.md"), c["out"])
-    c["index_header"] = _str(cfg, "index_header", DEFAULT_INDEX_HEADER, nullable=True)
-    c["index_line"] = _str(cfg, "index_line", DEFAULT_INDEX_LINE)
-    c["index_continuation_note"] = _str(cfg, "index_continuation_note", DEFAULT_CONTINUATION_NOTE)
-    c["log_file"] = expand(cfg.get("log_file", "log.md"), c["out"])
-    c["log_heading"] = _str(cfg, "log_heading", DEFAULT_LOG_HEADING)
-    c["log_item"] = _str(cfg, "log_item", DEFAULT_LOG_ITEM)
-    c["log_position"] = cfg.get("log_position", "end")
+    c["index_file"] = expand(cfg.get("index_file", D["index_file"]), c["out"])  # "" = no index
+    c["index_header"] = _str(cfg, "index_header", D["index_header"]) or None  # "" = nothing
+    c["index_line"] = _str(cfg, "index_line", D["index_line"])
+    c["index_continuation_note"] = _str(cfg, "index_continuation_note", D["index_continuation_note"])
+    c["log_file"] = expand(cfg.get("log_file", D["log_file"]), c["out"])  # "" = no log
+    c["log_heading"] = _str(cfg, "log_heading", D["log_heading"])
+    c["log_item"] = _str(cfg, "log_item", D["log_item"])
+    c["log_position"] = cfg.get("log_position", D["log_position"])
     if c["log_position"] not in ("end", "top"):
         die(f"log_position must be \"end\" or \"top\"; got {json.dumps(c['log_position'])}")
-    c["index_heading"] = _str(cfg, "index_heading", "", nullable=True)
+    c["index_heading"] = _str(cfg, "index_heading", D["index_heading"])
     c["pre_command"] = _command(cfg, "pre_command")
     c["post_command"] = _command(cfg, "post_command")
     if cfg.get("digest") is not None and not isinstance(cfg["digest"], dict):
@@ -1031,7 +1036,7 @@ def main(argv=None):
     r.add_argument("--dry-run", action="store_true")
     sub.add_parser("verify", parents=[common], help="check every archived pair")
     sub.add_parser("status", parents=[common], help="last run and gap warning")
-    sd = sub.add_parser("seed", parents=[common], help="create the config file with every default, if it is missing (never "
+    sd = sub.add_parser("seed", parents=[common], help="create the config file (every key null = the default), if it is missing (never "
                                      "overwrites); the plugin runs this at session start")
     sd.add_argument("--quiet", action="store_true", help="print nothing and always exit 0")
     sd.add_argument("--print", action="store_true", help="print the starter config instead of writing it")

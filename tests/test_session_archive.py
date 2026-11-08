@@ -364,9 +364,16 @@ class TestConfigOptions(Base):
 
     def test_index_and_log_can_be_turned_off(self):
         self.write_session(S_MAIN, conversation(12, pad=5000))
-        self.config(index_file=None, log_file="")
+        self.config(index_file="", log_file="")  # "" = off; null = the default
         self.assertEqual(len(self.run_json()["written"]), 1)
         self.assertEqual(sorted(f for f in os.listdir(self.out) if f.endswith(".md") and ".digest" not in f), [])
+
+    def test_null_is_the_same_as_leaving_the_key_out(self):
+        self.write_session(S_MAIN, conversation(12, pad=5000))
+        self.config(index_file=None, log_file=None, index_header=None, exclude=None, digest=None, min_turns=None)
+        self.assertEqual(len(self.run_json()["written"]), 1)
+        self.assertEqual(sorted(f for f in os.listdir(self.out) if f.endswith(".md") and ".digest" not in f),
+                         ["INDEX.md", "log.md"])
 
     def test_bad_template_is_reported(self):
         self.write_session(S_MAIN, conversation(12, pad=5000))
@@ -533,9 +540,26 @@ class TestSeed(Base):
             cfg = json.load(f)
         keys = set(cfg) - {"_doc"}
         self.assertEqual(keys, set(cfg["_doc"]) - {"about"}, "every key has a note")
-        self.assertEqual(cfg["min_turns"], 10)
-        self.assertEqual(cfg["exclude"], ["-private-tmp-", "-tmp-", "scratchpad"])
-        self.assertIsNone(cfg["out_dir"])
+        self.assertEqual({cfg[k] for k in keys}, {None}, "every key null: the seed pins no default")
+        self.assertIn("Default: 10.", cfg["_doc"]["min_turns"], "the note shows the current default")
+        self.assertIn('Default: ["-private-tmp-", "-tmp-", "scratchpad"]', cfg["_doc"]["exclude"])
+
+    def test_seeded_file_follows_a_changed_built_in_default(self):
+        """A later version that changes a default reaches users whose file was seeded."""
+        self.cli("seed", "--quiet")
+        code = ("import importlib.machinery, importlib.util, json, sys, types\n"
+                "ld = importlib.machinery.SourceFileLoader('sa', sys.argv[1])\n"
+                "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('sa', ld))\n"
+                "ld.exec_module(m)\n"
+                "m.DEFAULTS.update(min_turns=3, index_file='ARCHIVE.md', exclude=['x'])\n"
+                "a = types.SimpleNamespace(out=None, projects=None, min_turns=None, min_kb=None, live_minutes=None)\n"
+                "c = m.load_config(a)\n"
+                "print(json.dumps([c['min_turns'], c['index_file'], c['exclude']]))\n")
+        r = subprocess.run([sys.executable, "-c", code, CLI], env=self.env, capture_output=True, text=True,
+                           encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        turns, index, exclude = json.loads(r.stdout)
+        self.assertEqual((turns, os.path.basename(index), exclude), (3, "ARCHIVE.md", ["x"]))
 
     def test_existing_file_is_byte_identical(self):
         path = self.default_cfg()
