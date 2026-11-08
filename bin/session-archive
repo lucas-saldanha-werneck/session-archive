@@ -75,7 +75,8 @@ def config_path():
     """The config file every command reads: $SESSION_ARCHIVE_CONFIG, else $XDG_CONFIG_HOME or ~/.config."""
     home = os.path.expanduser("~")
     # ~ is expanded here: a launchd plist or settings.json env passes it through without a shell
-    return os.path.expanduser(os.environ.get("SESSION_ARCHIVE_CONFIG") or "") or os.path.join(
+    named = os.environ.get("SESSION_ARCHIVE_CONFIG")
+    return os.path.normpath(os.path.expanduser(named)) if named else os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "session-archive", "config.json")
 
 
