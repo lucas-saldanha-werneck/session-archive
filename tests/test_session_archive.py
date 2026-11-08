@@ -644,11 +644,37 @@ class TestSeed(Base):
         self.assertGreater(len(none), 4)
         self.assertEqual(none, seeded)
 
+    def test_a_failed_write_leaves_no_config_behind(self):
+        """The starter is written elsewhere first: an error mid-write never leaves a broken config.json."""
+        code = ("import importlib.machinery, importlib.util, sys\n"
+                "ld = importlib.machinery.SourceFileLoader('sa', sys.argv[1])\n"
+                "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('sa', ld))\n"
+                "ld.exec_module(m)\n"
+                "m.starter_text = lambda: '{\"min_turns\": 10, \"bad\": \"' + chr(0xD800) + '\"}'\n"
+                "print(m.seed_config()[0])\n")
+        r = subprocess.run([sys.executable, "-c", code, CLI], env=self.env, capture_output=True, text=True,
+                           encoding="utf-8")
+        self.assertEqual(r.stdout.strip(), "failed", r.stderr)
+        folder = os.path.dirname(self.default_cfg())
+        self.assertEqual(os.listdir(folder) if os.path.isdir(folder) else [], [], "no config, no temp file")
+        self.assertEqual(self.cli("seed").stdout.strip(), f"created {self.default_cfg()}", "the next seed works")
+
+    def test_tilde_in_config_path_and_seed_json(self):
+        self.env["SESSION_ARCHIVE_CONFIG"] = "~/dotfiles/sa.json"
+        r = self.cli("seed", "--json")
+        made = os.path.join(self.home, "dotfiles", "sa.json")
+        self.assertEqual(json.loads(r.stdout), {"state": "created", "path": made, "error": None})
+        with open(made, "w", encoding="utf-8") as f:
+            json.dump({"min_turns": 3, "min_kb": 0}, f)
+        self.write_session(S_MAIN, conversation(4))
+        self.assertEqual(len(self.run_json()["written"]), 1, "the file named with ~ is the one read")
+
     def test_hook_runs_the_seed(self):
         with open(os.path.join(ROOT, "hooks", "hooks.json"), encoding="utf-8") as f:
             hook = json.load(f)["hooks"]["SessionStart"][0]["hooks"][0]
         self.assertIn('"${CLAUDE_PLUGIN_ROOT}/bin/session-archive" seed --quiet', hook["command"])
         self.assertTrue(hook["command"].rstrip().endswith("exit 0"), "never a failing exit code at session start")
+        self.assertIn("seed --quiet || python ", hook["command"], "python only when python3 fails, not every time")
 
 
 class TestInstall(Base):

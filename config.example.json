@@ -1,6 +1,6 @@
 {
   "_doc": {
-    "about": "session-archive settings. Created by session-archive on its first run; plugin updates never touch this file. Every key holds its default, so this file behaves exactly like having none. Flags win over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is taken from the archive folder.",
+    "about": "session-archive settings. Created by session-archive on its first run; plugin updates never touch this file. Every key holds its default, so this file behaves exactly like having none. Flags win over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is taken from the archive folder (out_dir and projects_dir: from the folder the command runs in).",
     "out_dir": "Archive folder. null = ~/claude-session-archive.",
     "projects_dir": "Claude Code transcripts folder. null = $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
     "min_turns": "Sessions with fewer user turns are skipped as trivial.",

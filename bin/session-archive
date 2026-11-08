@@ -39,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 
@@ -73,7 +74,8 @@ DEFAULT_CONTINUATION_NOTE = " (continuation)"
 def config_path():
     """The config file every command reads: $SESSION_ARCHIVE_CONFIG, else $XDG_CONFIG_HOME or ~/.config."""
     home = os.path.expanduser("~")
-    return os.environ.get("SESSION_ARCHIVE_CONFIG") or os.path.join(
+    # ~ is expanded here: a launchd plist or settings.json env passes it through without a shell
+    return os.path.expanduser(os.environ.get("SESSION_ARCHIVE_CONFIG") or "") or os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "session-archive", "config.json")
 
 
@@ -82,7 +84,7 @@ STARTER_DOC = {
              "this file. Every key holds its default, so this file behaves exactly like having none. Flags win "
              "over environment variables (SESSION_ARCHIVE_DIR, SESSION_ARCHIVE_PROJECTS), which win over this "
              "file. Keys starting with _ are notes and are ignored. Paths may start with ~; a relative path is "
-             "taken from the archive folder.",
+             "taken from the archive folder (out_dir and projects_dir: from the folder the command runs in).",
     "out_dir": "Archive folder. null = ~/claude-session-archive.",
     "projects_dir": "Claude Code transcripts folder. null = $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
     "min_turns": "Sessions with fewer user turns are skipped as trivial.",
@@ -145,25 +147,46 @@ def starter_text():
 
 def seed_config():
     """Create the config file from the starter if nothing is there. Never overwrites or changes an existing
-    file (open mode "x"). Returns ("created" | "kept" | "failed", path, error)."""
+    file. The starter is written to a temporary file first and then linked into place, so the config file
+    only ever appears complete: a failed or killed write never leaves an empty or half-written config that
+    every later run would refuse as invalid JSON. Returns ("created" | "kept" | "failed", path, error)."""
     path = config_path()
     if not os.path.isabs(path):  # it would land in whatever folder the command runs in
         return "failed", path, ValueError("not an absolute path")
+    tmp = None
     try:
         if os.path.lexists(path):
             return "kept", path, None
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)  # raises if a file is in the way: that is a failure, not "kept"
+        fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=parent or None)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(starter_text())
         try:
-            f = open(path, "x", encoding="utf-8", newline="\n")
+            os.link(tmp, path)  # fails if the file exists: never overwrites
         except FileExistsError:  # created by someone else in between
             return "kept", path, None
-        with f:
-            f.write(starter_text())
+        except OSError:  # no hard links here (some network or FAT drives): create-if-missing instead
+            try:
+                with open(path, "x", encoding="utf-8", newline="\n") as f:
+                    try:
+                        f.write(starter_text())
+                    except BaseException:
+                        f.close()
+                        os.remove(path)  # only the file this call just created
+                        raise
+            except FileExistsError:
+                return "kept", path, None
         return "created", path, None
     except Exception as e:  # unwritable folder, a file in the way, ...: never stop the caller
         return "failed", path, e
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _str(cfg, key, default, nullable=False):
@@ -980,10 +1003,14 @@ def cmd_seed(a):
     state, path, err = seed_config()
     if a.quiet:
         return
-    if state == "failed":
+    if a.json:
+        print(json.dumps({"state": state, "path": path, "error": str(err) if err else None}))
+    elif state == "failed":
         print(f"could not create {path}: {err}", file=sys.stderr)
+    else:
+        print(f"{state} {path}")
+    if state == "failed":
         sys.exit(1)
-    print(f"{state} {path}")
 
 
 def main(argv=None):
@@ -1003,7 +1030,7 @@ def main(argv=None):
     r.add_argument("--dry-run", action="store_true")
     sub.add_parser("verify", parents=[common], help="check every archived pair")
     sub.add_parser("status", parents=[common], help="last run and gap warning")
-    sd = sub.add_parser("seed", help="create the config file with every default, if it is missing (never "
+    sd = sub.add_parser("seed", parents=[common], help="create the config file with every default, if it is missing (never "
                                      "overwrites); the plugin runs this at session start")
     sd.add_argument("--quiet", action="store_true", help="print nothing and always exit 0")
     sd.add_argument("--print", action="store_true", help="print the starter config instead of writing it")

@@ -125,7 +125,8 @@ that is already there. The scheduled run from `install.sh` reads the same file.
 
 ### More config keys (config file only)
 
-Paths may start with `~`; a relative path is taken from the archive folder. `null` or `""` turns `index_file`
+Paths may start with `~`; a relative path is taken from the archive folder (`out_dir` and `projects_dir`: from the
+folder the command runs in). `null` or `""` turns `index_file`
 and `log_file` off; for `out_dir`, `projects_dir`, `state_dir` and `skipped_file`, `null` means the default.
 
 | Key | What it does | Default |
