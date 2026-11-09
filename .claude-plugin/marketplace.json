@@ -9,7 +9,7 @@
     {
       "name": "session-archive",
       "source": "./",
-      "description": "A skill and a command that archive each Claude Code session as a digest plus the gzipped transcript, without ever archiving the same lines twice."
+      "description": "Copies each Claude Code conversation to an archive before Claude Code deletes old ones."
     }
   ]
 }

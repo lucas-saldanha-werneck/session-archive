@@ -65,8 +65,8 @@ The slug comes from the session's title (the one Claude Code shows), else its fi
 ## Install
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/session-archive
-/plugin install session-archive@session-archive
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install session-archive@lucas-plugins
 ```
 
 Then ask Claude to "archive my sessions". The skill runs the command, then fills in each new digest's TL;DR.
@@ -82,7 +82,7 @@ That copies `session-archive` to `~/.local/bin`. On macOS `--schedule` writes an
 (`com.claude-tools.session-archive`, daily at 4:00; `--hour`, `--label-prefix` to change). On Linux it prints
 the crontab line to add. A scheduled run leaves the TL;DR blank; the skill fills it in later.
 
-## Usage
+## Use
 
 ```
 session-archive plan                 # what a run would do; writes nothing
@@ -94,7 +94,7 @@ session-archive seed                 # create the config file with every default
 
 Add `--json` to any command for machine-readable output.
 
-## Configuration
+## Settings
 
 Flags win over environment variables, which win over the config file.
 
@@ -113,7 +113,7 @@ The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE
 { "out_dir": "~/Documents/claude-archive", "min_turns": 5 }
 ```
 
-### Your settings
+### Config file
 
 The config file is `~/.config/session-archive/config.json` (or `$XDG_CONFIG_HOME/session-archive/config.json`,
 or the file in `$SESSION_ARCHIVE_CONFIG`). The plugin creates it by itself the first time it runs (a
@@ -239,8 +239,7 @@ and archive as no file), and `install.sh` with a fake `launchctl`.
 ## Uninstall
 
 ```
-/plugin uninstall session-archive@session-archive
-/plugin marketplace remove session-archive
+/plugin uninstall session-archive@lucas-plugins
 ```
 
 If you ran `install.sh`: `./install.sh --uninstall` removes the command and the launchd agent. Your archive
