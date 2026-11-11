@@ -1,6 +1,6 @@
 {
   "name": "session-archive",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Copies each Claude Code conversation to an archive before Claude Code deletes old ones.",
   "author": {
     "name": "Lucas Saldanha Werneck",

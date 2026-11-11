@@ -68,7 +68,7 @@ The slug comes from the session's title (the one Claude Code shows), else its fi
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install session-archive@lucas-plugins
+/plugin install session-archive@lucas-tools
 ```
 
 Then ask Claude to "archive my sessions". The skill runs the command, then fills in each new digest's TL;DR.
@@ -241,7 +241,7 @@ and archive as no file), and `install.sh` with a fake `launchctl`.
 ## Uninstall
 
 ```
-/plugin uninstall session-archive@lucas-plugins
+/plugin uninstall session-archive@lucas-tools
 ```
 
 If you ran `install.sh`: `./install.sh --uninstall` removes the command and the launchd agent. Your archive
