@@ -43,7 +43,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TLDR_PLACEHOLDER = "<!-- TLDR: not written yet -->"
 DEFAULT_EXCLUDE = ["-private-tmp-", "-tmp-", "scratchpad"]
@@ -680,12 +680,25 @@ def session_files(c):
     return files
 
 
+def one_file_per_session(files, live_cut):
+    """A moved project folder leaves the same session id in two folders. Keep one file per id:
+    a copy still being written (it holds the whole id back as live), else the biggest, then the newest."""
+    best = {}
+    for f in files:
+        sid = os.path.basename(f)[:-6]
+        st = os.stat(f)
+        key = (st.st_mtime > live_cut, st.st_size, st.st_mtime)
+        if sid not in best or key > best[sid][0]:
+            best[sid] = (key, f)
+    return [f for f in files if best[os.path.basename(f)[:-6]][1] == f]
+
+
 def plan(c):
     archived = archived_sessions(c["out"], c["digest"])
     skipped = {r["session"]: r for r in read_jsonl(c["skipped_file"])}
     new, cont, skips = [], [], []
     live_cut = time.time() - c["live_minutes"] * 60
-    for f in session_files(c):
+    for f in one_file_per_session(session_files(c), live_cut):
         sid = os.path.basename(f)[:-6]
         size = os.path.getsize(f)
         mtime = os.path.getmtime(f)

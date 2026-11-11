@@ -54,6 +54,8 @@ The slug comes from the session's title (the one Claude Code shows), else its fi
   (`Lines: A-B`). A run reads them back, checks each `.gz` opens and holds that many lines, and archives only
   what is missing. Running it twice writes nothing the second time.
 - **Continuations.** A session you resumed after it was archived gets a `-cont-N` pair with only the new lines.
+- **Moved project folders.** Moving a project folder can leave the same session in two folders. A run keeps one
+  copy per session id: the biggest one, and waits while any copy is still being written.
 - **Broken copies come back.** A missing or corrupt `.gz` is reported by `verify`, and the next `run`
   archives that session again under a new name.
 - **Skips have reasons.** `live` (written in the last 2 minutes, picked up next run), `trivial` (fewer than
