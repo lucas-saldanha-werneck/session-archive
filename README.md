@@ -67,7 +67,7 @@ The slug comes from the session's title (the one Claude Code shows), else its fi
 ## Install
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install session-archive@lucas-tools
 ```
 
