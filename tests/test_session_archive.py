@@ -150,6 +150,39 @@ class TestArchive(Base):
         self.assertEqual(self.run_json()["written"], [], "after the continuation nothing is pending")
         self.assertEqual(self.cli("verify").returncode, 0)
 
+    def test_session_copied_to_a_moved_project_folder_is_archived_once(self):
+        """A project folder that moves leaves the same session id in two folders: one pair, from the longest copy."""
+        old = conversation(12, pad=5000)
+        self.write_session(S_MAIN, old, project="-work-demo")
+        extra = [line("user", "Asked after the folder moved"), line("assistant", "Answered.")]
+        self.write_session(S_MAIN, old + extra, project="-work-tools-demo")
+        rep = self.run_json()
+        self.assertEqual(rep["written"], ["2026-03-04_parser-refactor"])
+        with open(os.path.join(self.out, "2026-03-04_parser-refactor.digest.md"), encoding="utf-8") as f:
+            md = f.read()
+        self.assertIn("-work-tools-demo", md, "the longest copy is the one archived")
+        self.assertIn("**Lines:** 1-39", md)
+        self.assertEqual(self.run_json()["written"], [], "the shorter copy never adds a pair later")
+        self.assertEqual(self.cli("verify").returncode, 0)
+
+    def test_moved_session_that_grows_gets_one_continuation(self):
+        old = conversation(12, pad=5000)
+        self.write_session(S_MAIN, old, project="-work-demo")
+        self.run_json()
+        extra = [line("user", "Asked after the folder moved"), line("assistant", "Answered.")]
+        self.write_session(S_MAIN, old + extra, project="-work-tools-demo")
+        self.write_session(S_MAIN, old + extra[:1], project="-work-other-demo")
+        rep = self.run_json()
+        self.assertEqual(rep["written"], ["2026-03-04_parser-refactor-cont-1"])
+        self.assertEqual(self.run_json()["written"], [])
+
+    def test_live_copy_of_a_moved_session_holds_it_back(self):
+        old = conversation(12, pad=5000)
+        self.write_session(S_MAIN, old, project="-work-demo")
+        self.write_session(S_MAIN, old + [line("user", "still typing")], project="-work-tools-demo", age=10)
+        rep = self.run_json()
+        self.assertEqual(rep["written"], [], "the session is still being written in its new folder")
+
     def test_broken_copy_is_reported_and_rearchived(self):
         self.fixture()
         base = self.run_json()["written"][0]
