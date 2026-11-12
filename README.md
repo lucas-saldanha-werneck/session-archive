@@ -12,7 +12,7 @@ folder: a readable digest and the gzipped raw transcript. Claude Code deletes tr
   2026-03-04_parser-refactor-cont-1.jsonl.gz
   INDEX.md                                    one line per pair
   log.md                                      one entry per run
-  .state/                                     run history, skipped sessions, lock
+  .state/                                     run history, skipped sessions, lock, superseded/ (replaced pairs)
 ```
 
 ## What a digest looks like
@@ -57,12 +57,17 @@ The slug comes from the session's title (the one Claude Code shows), else its fi
 - **Moved project folders.** Moving a project folder can leave the same session in two folders. A run keeps one
   copy per session id: the biggest one, and waits while any copy is still being written.
 - **Broken copies come back.** A missing or corrupt `.gz` is reported by `verify`, and the next `run`
-  archives that session again under a new name.
+  archives that session again under a new name, then moves the broken pair to `.state/superseded/`. A
+  transcript whose archived lines changed is archived whole again the same way. `verify` also reports a
+  `.gz` without its digest and a digest without a readable `Session` field.
 - **Skips have reasons.** `live` (written in the last 2 minutes, picked up next run), `trivial` (fewer than
   10 user turns or under 50 KB), `subagent` (mostly sidechain lines). Trivial and subagent skips are
-  remembered and only checked again when the transcript changes.
+  remembered and only checked again when the transcript changes, or (trivial) when `min_turns` or `min_kb`
+  changed since.
 - **Gap warning.** `status` warns when the last successful run is within 3 days of Claude Code's retention.
-- Every pair is read back from disk before it counts. A lock file stops two runs at once.
+- Every pair is read back from disk before it counts. A lock file stops two runs at once; a lock older than an
+  hour is removed only when its run is gone. Copies are readable by you only (files 0600, new folders 0700),
+  like the transcripts. `run --dry-run` writes nothing, not even the folder or the lock.
 
 ## Install
 
@@ -107,7 +112,7 @@ Flags win over environment variables, which win over the config file.
 | Minimum user turns | `--min-turns` | | `min_turns` | `10` |
 | Minimum size (KB) | `--min-kb` | | `min_kb` | `50` |
 | "Live" window (minutes) | `--live-minutes` | | `live_minutes` | `2` |
-| Project folders to skip (substrings) | | | `exclude` | temp folders (`-tmp-`, `-private-tmp-`, `scratchpad`) |
+| Project folders to skip | | | `exclude` | temp folders (names starting with `-tmp-` or `-private-tmp-`, and `scratchpad`) |
 
 The config file is `~/.config/session-archive/config.json` (or `$SESSION_ARCHIVE_CONFIG`):
 
@@ -136,7 +141,7 @@ turns `index_file`, `log_file`, `index_header` and `index_heading` off. Inside `
 
 | Key | What it does | Default |
 |---|---|---|
-| `exclude` | Project folder names to skip. A plain entry matches anywhere in the name; `"^x"` matches names that start with `x` | `["-private-tmp-", "-tmp-", "scratchpad"]` |
+| `exclude` | Project folder names to skip. A plain entry matches anywhere in the name; `"^x"` matches names that start with `x` | `["^-private-tmp-", "^-tmp-", "scratchpad"]` |
 | `state_dir` | Where run history, the lock and `last-run.json` go | `<archive>/.state` |
 | `skipped_file` | The list of sessions skipped on purpose (JSON lines). Point it at a file another tool also keeps | `<state_dir>/skipped.jsonl` |
 | `skipped_hash_chars` | How many hex characters of the transcript's sha256 to record. Reading always compares the prefix, so records with shorter hashes from another tool are understood | `64` |
