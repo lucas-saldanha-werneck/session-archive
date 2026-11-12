@@ -6,7 +6,7 @@
     "min_turns": "Sessions with fewer user turns are skipped as trivial. Default: 10.",
     "min_kb": "Sessions smaller than this many KB are skipped as trivial. Default: 50.",
     "live_minutes": "A transcript written in the last N minutes is live (usually this session) and waits. Default: 2.",
-    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x. Default: [\"-private-tmp-\", \"-tmp-\", \"scratchpad\"].",
+    "exclude": "Project folder names to skip: a plain entry matches anywhere, \"^x\" matches names starting with x. Default: [\"^-private-tmp-\", \"^-tmp-\", \"scratchpad\"].",
     "state_dir": "Run history, lock and last-run.json. Default: <archive>/.state.",
     "skipped_file": "Sessions skipped on purpose (JSON lines). Default: <state_dir>/skipped.jsonl.",
     "skipped_hash_chars": "Hex characters of the transcript sha256 to record. Default: 64.",

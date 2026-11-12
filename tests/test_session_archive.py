@@ -271,6 +271,130 @@ class TestArchive(Base):
         self.assertEqual(rep["written"], [])
 
 
+class TestAuditRound2(Base):
+    def big(self, sid=S_MAIN, project="-work-demo", **kw):
+        return self.write_session(sid, conversation(12, pad=5000, **kw), project=project)
+
+    def grow(self, path, *texts):
+        with open(path, "a", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(line("user", t) for t in texts) + "\n")
+        t = time.time() - 600
+        os.utime(path, (t, t))
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permissions")
+    def test_copies_are_private(self):  # SA-02
+        self.big()
+        base = self.run_json()["written"][0]
+        self.assertEqual(os.stat(self.out).st_mode & 0o777, 0o700)
+        for name in (base + ".jsonl.gz", base + ".digest.md", "INDEX.md", "log.md"):
+            self.assertEqual(os.stat(os.path.join(self.out, name)).st_mode & 0o777, 0o600, name)
+
+    def test_null_text_does_not_stop_the_run(self):  # SA-03
+        lines = conversation(12, pad=5000)
+        lines.append(line("assistant", content=[{"type": "text", "text": None}]))
+        self.write_session(S_MAIN, lines)
+        rep = self.run_json()
+        self.assertEqual((rep["status"], len(rep["written"])), ("ok", 1))
+
+    def test_a_session_that_fails_to_parse_does_not_stop_the_plan(self):  # SA-03 (one try per session)
+        self.big()
+        self.write_session(S_SMALL, conversation(12, pad=5000, first="Second session"))
+        bad = os.path.join(self.projects, "-work-demo", S_SMALL + ".jsonl")
+        with open(bad, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "message": "not an object"}) + "\n")
+        t = time.time() - 600
+        os.utime(bad, (t, t))
+        rep = self.run_json()
+        self.assertGreaterEqual(len(rep["written"]), 1)
+
+    def test_broken_pair_is_moved_aside_after_the_recopy(self):  # SA-04
+        self.big()
+        base = self.run_json()["written"][0]
+        with open(os.path.join(self.out, base + ".jsonl.gz"), "wb") as f:
+            f.write(b"not gzip")
+        self.assertEqual(self.run_json()["written"], [base + "-2"])
+        r = self.cli("verify")
+        self.assertIn("all pairs OK", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.out, ".state", "superseded", base + ".digest.md")))
+
+    def test_verify_reports_orphan_gzip_and_unreadable_digest(self):  # SA-05
+        self.big()
+        base = self.run_json()["written"][0]
+        os.remove(os.path.join(self.out, base + ".digest.md"))
+        r = self.cli("verify", ok=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(base + ".jsonl.gz", r.stdout)
+        self.assertNotIn("all pairs OK", r.stdout)
+        with open(os.path.join(self.out, "x.digest.md"), "w") as f:
+            f.write("cut")
+        self.assertIn("x.digest.md", self.cli("verify", ok=False).stdout)
+
+    def test_rewritten_transcript_with_same_line_count_is_recopied(self):  # SA-06
+        p = self.big()
+        base = self.run_json()["written"][0]
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text.replace("Refactor the parser module please", "Refactor the lexer module please"))
+        t = time.time() - 600
+        os.utime(p, (t, t))
+        rep = self.run_json()
+        self.assertEqual(rep["written"], [base + "-2"])
+        with open(os.path.join(self.out, base + "-2.digest.md"), encoding="utf-8") as f:
+            self.assertIn("Refactor the lexer module please", f.read())
+        self.assertEqual(self.run_json()["written"], [], "nothing pending afterwards")
+        self.assertEqual(self.cli("verify").returncode, 0)
+
+    def test_lowering_the_thresholds_brings_back_a_skipped_session(self):  # SA-01
+        self.write_session(S_SMALL, conversation(3))
+        self.assertEqual(self.run_json()["written"], [])
+        self.assertEqual(len(self.run_json("--min-turns", "2", "--min-kb", "0")["written"]), 1)
+
+    def test_dry_run_writes_nothing(self):  # SA-11
+        self.big()
+        r = self.cli("run", "--dry-run")
+        self.assertIn("would write 1 pair(s)", r.stdout)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_continues_points_to_the_latest_continuation(self):  # SA-12
+        p = self.big()
+        base = self.run_json()["written"][0]
+        self.grow(p, "first follow-up")
+        self.assertEqual(self.run_json()["written"], [base + "-cont-1"])
+        self.grow(p, "second follow-up")
+        self.assertEqual(self.run_json()["written"], [base + "-cont-2"])
+        with open(os.path.join(self.out, base + "-cont-2.digest.md"), encoding="utf-8") as f:
+            self.assertIn(f"**Continues:** {base}-cont-1.digest.md", f.read())
+
+    def test_old_lock_of_a_live_run_is_kept(self):  # SA-08
+        state = os.path.join(self.out, ".state")
+        os.makedirs(state)
+        lock = os.path.join(state, "lock")
+        with open(lock, "w") as f:
+            f.write(str(os.getpid()))  # this test process: alive
+        old = time.time() - 2 * 3600
+        os.utime(lock, (old, old))
+        r = self.cli("run", ok=False)
+        self.assertEqual(r.returncode, 3)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        with open(lock, "w") as f:
+            f.write(str(dead.pid))
+        os.utime(lock, (old, old))
+        self.cli("run")
+
+    def test_only_real_temp_folders_are_excluded_by_default(self):  # SA-13
+        self.big(project="-Users-me-tmp-api")
+        self.big(sid=S_TMP, project="-tmp-scratch-thing")
+        rep = self.run_json()
+        self.assertEqual(len(rep["written"]), 1)
+        with open(os.path.join(self.out, rep["written"][0] + ".digest.md"), encoding="utf-8") as f:
+            self.assertIn(S_MAIN, f.read())
+        plan = json.loads(self.cli("plan", "--json").stdout)
+        self.assertEqual(plan["excluded"], ["-tmp-scratch-thing"])
+        self.assertIn("excluded", self.cli("plan").stdout)
+
+
 class TestConfigOptions(Base):
     """Every option added for archives that already exist in another format or share files with other tools."""
 
@@ -575,7 +699,7 @@ class TestSeed(Base):
         self.assertEqual(keys, set(cfg["_doc"]) - {"about"}, "every key has a note")
         self.assertEqual({cfg[k] for k in keys}, {None}, "every key null: the seed pins no default")
         self.assertIn("Default: 10.", cfg["_doc"]["min_turns"], "the note shows the current default")
-        self.assertIn('Default: ["-private-tmp-", "-tmp-", "scratchpad"]', cfg["_doc"]["exclude"])
+        self.assertIn('Default: ["^-private-tmp-", "^-tmp-", "scratchpad"]', cfg["_doc"]["exclude"])
 
     def test_seeded_file_follows_a_changed_built_in_default(self):
         """A later version that changes a default reaches users whose file was seeded."""
@@ -777,7 +901,23 @@ class TestInstall(Base):
         r = self.sh("--schedule", "--os", "linux")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("crontab", r.stdout)
-        self.assertIn("session-archive run", r.stdout)
+        self.assertIn("session-archive' run", r.stdout)
+
+    def test_cron_line_quotes_paths_and_log_folder_exists(self):  # SA-09
+        self.env["SESSION_ARCHIVE_DIR"] = os.path.join(self.tmp, "my archive")
+        r = self.sh("--schedule", "--os", "linux")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SESSION_ARCHIVE_DIR='" + os.path.join(self.tmp, "my archive") + "' ", r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(self.home, ".cache")))
+
+    def test_plist_escapes_xml(self):  # SA-10
+        self.env["SESSION_ARCHIVE_DIR"] = os.path.join(self.tmp, "R&D <archive>")
+        r = self.sh("--schedule", "--os", "macos", "--no-load")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        plist = os.path.join(self.home, "Library", "LaunchAgents", "com.claude-tools.session-archive.plist")
+        import xml.dom.minidom
+        doc = xml.dom.minidom.parse(plist)  # raises on a bare &
+        self.assertIn("R&D <archive>", doc.toxml().replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"))
 
 
 if __name__ == "__main__":

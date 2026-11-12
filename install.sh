@@ -26,6 +26,10 @@ LABEL="$PREFIX.session-archive"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PY="$(command -v python3 || command -v python || true)"
 run() { if [ $DRY = 1 ]; then echo "would run: $*"; else "$@"; fi; }
+# A value inside the plist's XML: & < > escaped, or the plist does not load.
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# A value for the crontab line: single-quoted for sh, and % escaped (cron turns a bare % into a newline).
+cronq() { printf "'%s'" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g" -e 's/%/\\%/g')"; }
 
 if [ $UNINSTALL = 1 ]; then
   if [ "$OS" = macos ] && [ -f "$PLIST" ]; then
@@ -52,7 +56,7 @@ case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "note: $BIN_DIR is not on your PATH
 OUT_XML=""
 if [ -n "${SESSION_ARCHIVE_DIR:-}" ]; then
   OUT_XML="  <key>EnvironmentVariables</key>
-  <dict><key>SESSION_ARCHIVE_DIR</key><string>$SESSION_ARCHIVE_DIR</string></dict>"
+  <dict><key>SESSION_ARCHIVE_DIR</key><string>$(xml "$SESSION_ARCHIVE_DIR")</string></dict>"
 fi
 LOG_DIR="$HOME/Library/Logs"
 case "$OS" in
@@ -61,14 +65,14 @@ case "$OS" in
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$(xml "$LABEL")</string>
   <key>ProgramArguments</key>
-  <array><string>$PY</string><string>$BIN_DIR/session-archive</string><string>run</string></array>
+  <array><string>$(xml "$PY")</string><string>$(xml "$BIN_DIR/session-archive")</string><string>run</string></array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>$HOUR</integer><key>Minute</key><integer>0</integer></dict>
 $OUT_XML
-  <key>StandardOutPath</key><string>$LOG_DIR/session-archive.log</string>
-  <key>StandardErrorPath</key><string>$LOG_DIR/session-archive.log</string>
+  <key>StandardOutPath</key><string>$(xml "$LOG_DIR/session-archive.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOG_DIR/session-archive.log")</string>
 </dict>
 </plist>"
     if [ $DRY = 1 ]; then echo "would write $PLIST (label $LABEL):"; echo "$body"
@@ -83,7 +87,10 @@ $OUT_XML
       echo "loaded $LABEL: runs daily at $HOUR:00, log $LOG_DIR/session-archive.log"
     fi ;;
   linux)
+    run mkdir -p "$HOME/.cache"  # the line appends its log there
+    ENV_PART=""
+    [ -n "${SESSION_ARCHIVE_DIR:-}" ] && ENV_PART="SESSION_ARCHIVE_DIR=$(cronq "$SESSION_ARCHIVE_DIR") "
     echo "add this line with crontab -e (runs daily at $HOUR:00):"
-    echo "0 $HOUR * * * ${SESSION_ARCHIVE_DIR:+SESSION_ARCHIVE_DIR=$SESSION_ARCHIVE_DIR }$PY $BIN_DIR/session-archive run >> \$HOME/.cache/session-archive.log 2>&1" ;;
+    echo "0 $HOUR * * * ${ENV_PART}$(cronq "$PY") $(cronq "$BIN_DIR/session-archive") run >> \"\$HOME/.cache/session-archive.log\" 2>&1" ;;
   *) echo "no scheduler support on this OS; run 'session-archive run' with your own task scheduler" ;;
 esac

@@ -43,10 +43,12 @@ import tempfile
 import time
 import unicodedata
 
-VERSION = "0.2.2"
+VERSION = "0.2.5"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TLDR_PLACEHOLDER = "<!-- TLDR: not written yet -->"
-DEFAULT_EXCLUDE = ["-private-tmp-", "-tmp-", "scratchpad"]
+# Temp folders only: "^" anchors to the start of the project folder name, so /tmp/x (-tmp-x) is skipped but
+# a real project such as ~/tmp-api (-Users-me-tmp-api) is not.
+DEFAULT_EXCLUDE = ["^-private-tmp-", "^-tmp-", "scratchpad"]
 FIELD_KEYS = ["date", "session", "project", "source", "raw_copy", "lines", "continues", "user_turns",
               "compactions", "archived"]
 DEFAULT_DIGEST = {
@@ -466,11 +468,25 @@ def read_lines(path):
 
 
 def gz_line_count(path):
+    return (gz_lines_and_hash(path) or (None, None))[0]
+
+
+def lines_hash(lines):
+    """A hash of raw lines that ignores how the last one ends (a newline added later is not a change)."""
+    h = hashlib.sha256()
+    for b in lines:
+        h.update(b.rstrip(b"\r\n") + b"\n")
+    return h.hexdigest()
+
+
+def gz_lines_and_hash(path):
+    """(line count, lines_hash) of a gzipped chunk, or None when it does not open."""
     try:
         with gzip.open(path, "rb") as f:
-            return sum(1 for _ in f)
+            lines = f.readlines()
     except Exception:
         return None
+    return len(lines), lines_hash(lines)
 
 
 def same_hash(recorded, path):
@@ -486,19 +502,40 @@ def sha256(path):
     return h.hexdigest()
 
 
+def make_private_dir(path):
+    """Create a folder (and its parents) readable by the owner only; an existing folder is left as it is."""
+    if path and not os.path.isdir(path):
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(path, 0o700)  # makedirs' mode goes through the umask
+        except OSError:
+            pass
+
+
 def write_atomic(path, data, mode="w"):
-    tmp = path + ".tmp"
-    if mode == "w":
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(data)
-    else:
-        with open(tmp, "wb") as f:
-            f.write(data)
-    os.replace(tmp, path)
+    """Write through a fresh temporary file in the same folder (mkstemp: unpredictable name, 0600, never follows
+    a planted link), then rename it over the target. Archived conversations stay as private as the originals."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        if mode == "w":
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write(data)
+        else:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_text(path, text):
-    with open(path, "a", encoding="utf-8", newline="\n") as f:
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
 
@@ -546,7 +583,7 @@ def text_of(content):
             continue
         t = blk.get("type")
         if t == "text":
-            texts.append(blk.get("text", ""))
+            texts.append(blk.get("text") if isinstance(blk.get("text"), str) else "")
         elif t in ("tool_use", "tool_result", "server_tool_use"):
             tools += 1
     return "\n\n".join(x for x in texts if x.strip()), tools
@@ -635,9 +672,10 @@ def archived_sessions(out_dir, dg):
             continue
         sid = m.group(1)
         gz = d[: -len(".digest.md")] + ".jsonl.gz"
-        n = gz_line_count(gz) if os.path.exists(gz) else None
+        n, digest_hash = (gz_lines_and_hash(gz) if os.path.exists(gz) else None) or (None, None)
         lm = dg["lines_re"].search(head)
-        e = res.setdefault(sid, {"digests": [], "ranges": [], "broken": [], "lines": 0})
+        e = res.setdefault(sid, {"digests": [], "ranges": [], "broken": [], "broken_digests": [], "pairs": [],
+                                 "lines": 0})
         e["digests"].append(d)
         if lm:
             a, b = int(lm.group(1)), int(lm.group(2))
@@ -647,9 +685,11 @@ def archived_sessions(out_dir, dg):
             ok = bool(n)
         if ok:
             e["ranges"].append((a, b))
+            e["pairs"].append({"digest": d, "from": a, "to": b, "hash": digest_hash})
         else:
             why = "missing" if not os.path.exists(gz) else ("corrupt gzip" if n is None else f"{n} lines, expected {b - a + 1}")
             e["broken"].append(f"{os.path.basename(gz)} ({why})")
+            e["broken_digests"].append(d)
     for e in res.values():
         covered = 0
         for a, b in sorted(e["ranges"]):
@@ -658,12 +698,44 @@ def archived_sessions(out_dir, dg):
                 break
             covered = max(covered, b)
         e["lines"] = covered
+        # The pair a continuation follows: the one that ends last (names do not sort that way: x-cont-1 < x).
+        e["last"] = max(e["pairs"], key=lambda q: (q["to"], q["from"]))["digest"] if e["pairs"] else None
     return res
+
+
+def changed_pairs(pairs, raw):
+    """Pairs whose lines no longer match the transcript (something rewrote lines already archived)."""
+    return [q for q in pairs if q["to"] > len(raw) or lines_hash(raw[q["from"] - 1:q["to"]]) != q["hash"]]
+
+
+def unrecognized_files(out_dir, dg):
+    """Archive files no pair accounts for: a .jsonl.gz without its digest, a digest without a readable Session."""
+    if not os.path.isdir(out_dir):
+        return []
+    names = set(os.listdir(out_dir))
+    found = []
+    for name in sorted(names):
+        if name.startswith("."):
+            continue
+        if name.endswith(".jsonl.gz") and name[: -len(".jsonl.gz")] + ".digest.md" not in names:
+            found.append(f"{name} (no digest)")
+        elif name.endswith(".digest.md"):
+            with open(os.path.join(out_dir, name), encoding="utf-8", errors="ignore") as f:
+                if not dg["session_re"].search(f.read(4000)):
+                    found.append(f"{name} (no Session field)")
+    return found
 
 
 def excluded(proj, patterns):
     """A pattern is a substring of the project folder name; "^x" means the name starts with x."""
     return any(proj.startswith(x[1:]) if x.startswith("^") else x in proj for x in patterns)
+
+
+def excluded_projects(c):
+    if not os.path.isdir(c["projects"]):
+        return []
+    return [p for p in sorted(os.listdir(c["projects"]))
+            if os.path.isdir(os.path.join(c["projects"], p)) and excluded(p, c["exclude"])]
 
 
 def session_files(c):
@@ -700,35 +772,69 @@ def plan(c):
     live_cut = time.time() - c["live_minutes"] * 60
     for f in one_file_per_session(session_files(c), live_cut):
         sid = os.path.basename(f)[:-6]
-        size = os.path.getsize(f)
-        mtime = os.path.getmtime(f)
-        if mtime > live_cut:
-            skips.append({"session": sid, "jsonl": f, "reason": "live", "record": False})
-            continue
-        a = archived.get(sid)
-        if a and a["lines"] > 0:
-            cur = len(read_lines(f))
-            if cur > a["lines"]:
-                cont.append({"session": sid, "jsonl": f, "from": a["lines"] + 1, "to": cur, "digests": a["digests"]})
-            continue
-        prev = skipped.get(sid)
-        if prev and prev.get("size") == size and (prev.get("mtime") == mtime or same_hash(prev.get("sha256"), f)):
-            continue  # skipped on purpose before and unchanged since
-        entries = parse_entries(read_lines(f))
-        info = summarize(entries)
-        reason = None
-        if info["msgs"] and info["sidechain"] * 2 > info["msgs"]:
-            reason = "subagent"
-        elif info["user_turns"] < c["min_turns"] or size < c["min_kb"] * 1024:
-            reason = "trivial"
-        if reason:
-            skips.append({"session": sid, "jsonl": f, "reason": reason, "record": True, "size": size,
-                          "user_turns": info["user_turns"]})
-            continue
-        new.append({"session": sid, "jsonl": f, "mtime": mtime, "size": size, "rearchive": bool(a)})
+        try:
+            plan_one(c, f, sid, archived.get(sid), skipped.get(sid), live_cut, new, cont, skips)
+        except Exception as e:  # one unreadable transcript must not stop the others
+            skips.append({"session": sid, "jsonl": f, "reason": f"error: {e!r}"[:200], "record": False})
     new.sort(key=lambda x: x["mtime"])
     broken = {sid: e["broken"] for sid, e in archived.items() if e["broken"]}
-    return {"new": new, "continued": cont, "skipped": skips, "broken": broken, "archived": len(archived)}
+    return {"new": new, "continued": cont, "skipped": skips, "broken": broken, "archived": len(archived),
+            "excluded": excluded_projects(c)}
+
+
+def plan_one(c, f, sid, a, prev, live_cut, new, cont, skips):
+    size = os.path.getsize(f)
+    mtime = os.path.getmtime(f)
+    if mtime > live_cut:
+        skips.append({"session": sid, "jsonl": f, "reason": "live", "record": False})
+        return
+    # Pairs a successful copy makes obsolete: broken ones always; every one when the transcript was rewritten.
+    supersedes = list(a["broken_digests"]) if a else []
+    if a and a["lines"] > 0:
+        raw = read_lines(f)
+        if not changed_pairs(a["pairs"], raw):
+            if len(raw) > a["lines"]:
+                cont.append({"session": sid, "jsonl": f, "from": a["lines"] + 1, "to": len(raw),
+                             "digests": a["digests"], "prev": a["last"], "supersedes": supersedes})
+            return
+        supersedes = list(a["digests"])  # rewritten: archive it whole again, old pairs set aside afterwards
+        new.append({"session": sid, "jsonl": f, "mtime": mtime, "size": size, "rearchive": True,
+                    "why": "transcript changed", "supersedes": supersedes})
+        return
+    if prev and prev.get("size") == size and (prev.get("mtime") == mtime or same_hash(prev.get("sha256"), f)) \
+            and not limits_changed(prev, c):
+        return  # skipped on purpose before, unchanged since, and judged with the same limits
+    entries = parse_entries(read_lines(f))
+    info = summarize(entries)
+    reason = None
+    if info["msgs"] and info["sidechain"] * 2 > info["msgs"]:
+        reason = "subagent"
+    elif info["user_turns"] < c["min_turns"] or size < c["min_kb"] * 1024:
+        reason = "trivial"
+    if reason:
+        skips.append({"session": sid, "jsonl": f, "reason": reason, "record": True, "size": size,
+                      "user_turns": info["user_turns"]})
+        return
+    new.append({"session": sid, "jsonl": f, "mtime": mtime, "size": size, "rearchive": bool(a),
+                "why": "broken copy" if a else "", "supersedes": supersedes})
+
+
+def limits_changed(prev, c):
+    """A "trivial" record made under other min_turns / min_kb is judged again. A record without them (an older
+    version, or another tool sharing the file) is taken as it is."""
+    if prev.get("reason") != "trivial" or "min_turns" not in prev or "min_kb" not in prev:
+        return False
+    return (prev["min_turns"], prev["min_kb"]) != (c["min_turns"], c["min_kb"])
+
+
+def set_aside(c, digests):
+    """Move pairs a newer copy replaced into <state>/superseded (kept, never deleted), so verify stops failing."""
+    dest = os.path.join(c["state"], "superseded")
+    for d in digests:
+        make_private_dir(dest)
+        for path in (d, d[: -len(".digest.md")] + ".jsonl.gz"):
+            if os.path.exists(path):
+                os.replace(path, os.path.join(dest, os.path.basename(path)))
 
 
 # ---------------------------------------------------------------- writing pairs
@@ -745,7 +851,7 @@ def write_pair(c, item, cont=False):
     raw = read_lines(f)
     if cont:
         a, b = item["from"], item["to"]
-        prev = sorted(item["digests"])[-1]
+        prev = item.get("prev") or sorted(item["digests"])[-1]
         root = os.path.basename(sorted(item["digests"])[0])[: -len(".digest.md")]
         root = re.sub(r"-cont-\d+$", "", root)
         base = unique_base(c["out"], f"{root}-cont-{len(item['digests'])}")
@@ -806,9 +912,9 @@ class Lock:
         self.path = os.path.join(state, "lock")
 
     def __enter__(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        if os.path.exists(self.path) and time.time() - os.path.getmtime(self.path) > 3600:
-            os.remove(self.path)  # stale: a crashed run more than an hour ago
+        make_private_dir(os.path.dirname(self.path))
+        if os.path.exists(self.path) and self.stale():
+            os.remove(self.path)  # stale: a crashed run
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -822,6 +928,46 @@ class Lock:
             os.remove(self.path)
         except OSError:
             pass
+
+    def stale(self):
+        """Older than an hour and its run is gone. A day old counts as stale anyway: by then the PID may
+        belong to another process."""
+        age = time.time() - os.path.getmtime(self.path)
+        if age <= 3600:
+            return False
+        if age > 86400:
+            return True
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                pid = int(f.read().strip() or "0")
+        except (OSError, ValueError):
+            return True
+        return not pid_alive(pid)
+
+
+def pid_alive(pid):
+    if pid <= 0:
+        return False
+    if os.name == "nt":  # os.kill(pid, 0) would terminate the process on Windows
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k.GetLastError() == 5  # access denied: it exists
+        code = ctypes.c_ulong()
+        try:
+            return bool(k.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- commands
@@ -840,7 +986,8 @@ def print_plan(p, as_json):
     print(f"already archived sessions: {p['archived']}")
     print(f"new: {len(p['new'])}")
     for x in p["new"]:
-        print(f"  {x['session']}  {x['size'] // 1024} KB{'  (re-archive: broken copy)' if x['rearchive'] else ''}")
+        note = f"  (re-archive: {x.get('why') or 'broken copy'})" if x["rearchive"] else ""
+        print(f"  {x['session']}  {x['size'] // 1024} KB{note}")
     print(f"continued since last archive: {len(p['continued'])}")
     for x in p["continued"]:
         print(f"  {x['session']}  lines {x['from']}-{x['to']}")
@@ -849,6 +996,8 @@ def print_plan(p, as_json):
         print(f"  {x['session']}  {x['reason']}")
     for sid, why in p["broken"].items():
         print(f"WARNING broken archive for {sid}: {'; '.join(why)}")
+    if p.get("excluded"):
+        print(f"excluded project folders ({len(p['excluded'])}): {', '.join(p['excluded'])}")
 
 
 def cmd_plan(c, a):
@@ -858,7 +1007,7 @@ def cmd_plan(c, a):
 def write_index_and_log(c, made):
     common = template_common(made)
     if c["index_file"]:
-        os.makedirs(os.path.dirname(c["index_file"]), exist_ok=True)
+        make_private_dir(os.path.dirname(c["index_file"]))
         if not os.path.exists(c["index_file"]) and c["index_header"]:
             append_text(c["index_file"], c["index_header"])
         if c["index_heading"]:
@@ -867,7 +1016,7 @@ def write_index_and_log(c, made):
             common, **m, continuation_note=c["index_continuation_note"] if m["continuation"] else ""),
             "index_line") + "\n" for m in made))
     if c["log_file"]:
-        os.makedirs(os.path.dirname(c["log_file"]), exist_ok=True)
+        make_private_dir(os.path.dirname(c["log_file"]))
         items = "".join(fill(c["log_item"], dict(common, **m), "log_item") + "\n" for m in made)
         entry = fill(c["log_heading"], common, "log_heading") + "\n\n" + items + "\n"
         if c["log_position"] == "top" and os.path.exists(c["log_file"]):
@@ -899,7 +1048,14 @@ def run_hook(c, which, extra_env=None):
 
 
 def cmd_run(c, a):
-    os.makedirs(c["out"], exist_ok=True)
+    if a.dry_run:  # reads only: no folder, no lock, no hook
+        p = plan(c)
+        todo = min(len(p["new"]), a.limit)
+        todo += min(len(p["continued"]), max(0, a.limit - todo))
+        print_plan(p, a.json)
+        print(f"dry run: would write {todo} pair(s); {len(p['new']) + len(p['continued']) - todo} left for a later run")
+        return
+    make_private_dir(c["out"])
     with Lock(c["state"]):
         if c["pre_command"] and not a.dry_run:
             rc = run_hook(c, "pre_command")
@@ -920,11 +1076,17 @@ def cmd_run(c, a):
                 made.append(write_pair(c, item, cont))
             except Exception as e:
                 failed.append(f"{item['session']}: {e}")
+                continue
+            try:
+                set_aside(c, item.get("supersedes") or [])
+            except OSError as e:
+                failed.append(f"{item['session']}: copied, but the old pair could not be set aside: {e}")
         for s in p["skipped"]:
             if s.get("record"):
-                os.makedirs(os.path.dirname(c["skipped_file"]), exist_ok=True)
+                make_private_dir(os.path.dirname(c["skipped_file"]))
                 append_text(c["skipped_file"], json.dumps(
                     {"session": s["session"], "reason": s["reason"], "size": s["size"],
+                     "min_turns": c["min_turns"], "min_kb": c["min_kb"],
                      "sha256": sha256(s["jsonl"])[: c["skipped_hash_chars"]],
                      "mtime": os.path.getmtime(s["jsonl"]),
                      "at": iso(now())}) + "\n")
@@ -975,16 +1137,19 @@ def cmd_run(c, a):
 def cmd_verify(c, a):
     arch = archived_sessions(c["out"], c["digest"])
     bad = {sid: e["broken"] for sid, e in arch.items() if e["broken"]}
+    stray = unrecognized_files(c["out"], c["digest"])
     pairs = sum(len(e["digests"]) for e in arch.values())
     if a.json:
-        print(json.dumps({"sessions": len(arch), "pairs": pairs, "broken": bad}, indent=1))
+        print(json.dumps({"sessions": len(arch), "pairs": pairs, "broken": bad, "unrecognized": stray}, indent=1))
     else:
         print(f"{pairs} pair(s) for {len(arch)} session(s) in {c['out']}")
         for sid, why in bad.items():
             print(f"BROKEN {sid}: {'; '.join(why)}")
-        if not bad:
+        for x in stray:
+            print(f"UNRECOGNIZED {x}")
+        if not bad and not stray:
             print("all pairs OK")
-    sys.exit(1 if bad else 0)
+    sys.exit(1 if bad or stray else 0)
 
 
 def cmd_status(c, a):
