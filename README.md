@@ -1,8 +1,22 @@
 # session-archive
 
+[![CI](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/session-archive)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue)](CHANGELOG.md)
+
 A Claude Code plugin that keeps your conversations. Each session becomes a pair of files in an archive
 folder: a readable digest and the gzipped raw transcript. Claude Code deletes transcripts older than
 `cleanupPeriodDays` (30 days by default), so whatever you did not copy is gone after that.
+
+[![session-archive demo: tap to open the video](https://github.com/user-attachments/assets/bec25176-720b-43f9-9a61-171b5b0ddcb5)](https://lucas-saldanha-werneck.github.io/session-archive/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/a9c32a12-0132-466e-a542-a61cc9b4a6b9" alt="The archive run, with every pair checked on disk" width="320"><br>In the terminal</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/3341202f-d3e5-4e40-842d-2954006099fa" alt="A readable digest of one session" width="320"><br>A digest you can read</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/a1274af8-76c7-4423-a6c8-c18fb4b8b4b8" alt="Summary: every conversation kept for good" width="320"><br>The idea in short</td>
+</tr>
+</table>
 
 ```
 ~/claude-session-archive/
@@ -272,3 +286,7 @@ suggests a skill called "sync Claude sessions" that brings past conversation his
 MIT
 
 Built with Claude Code
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and what this plugin accesses.
