@@ -3,7 +3,6 @@
 [![CI](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/session-archive)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.7-blue)](CHANGELOG.md)
-[![SkillEvaluator](https://img.shields.io/badge/SkillEvaluator-8%2F8-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![session-archive score](https://img.shields.io/badge/skill%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 
 A Claude Code plugin that keeps your conversations. Each session becomes a pair of files in an archive

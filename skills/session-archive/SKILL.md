@@ -63,8 +63,8 @@ follow-up command failed: report it.
   a change, `session-archive plan` shows whether existing digests are still recognized
   (`already archived sessions`).
 - Retention: Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) from
-  the Claude Code user settings file. `session-archive status` warns when the last successful run is close to that.
-- A daily run without Claude: the repo installer with `--schedule` (launchd on macOS, a crontab line on
+  `~/.claude/settings.json`. `session-archive status` warns when the last successful run is close to that.
+- A daily run without Claude: `./install.sh --schedule` from the repo (launchd on macOS, a crontab line on
   Linux).
 
 ## Out of scope
