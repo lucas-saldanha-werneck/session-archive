@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/session-archive/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/session-archive)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.6-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.7-blue)](CHANGELOG.md)
+[![session-archive score](https://img.shields.io/badge/skill%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 
 A Claude Code plugin that keeps your conversations. Each session becomes a pair of files in an archive
 folder: a readable digest and the gzipped raw transcript. Claude Code deletes transcripts older than
