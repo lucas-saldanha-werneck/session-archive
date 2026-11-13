@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/session-archive)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.7-blue)](CHANGELOG.md)
 [![session-archive score](https://img.shields.io/badge/skill%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 A Claude Code plugin that keeps your conversations. Each session becomes a pair of files in an archive
 folder: a readable digest and the gzipped raw transcript. Claude Code deletes transcripts older than
