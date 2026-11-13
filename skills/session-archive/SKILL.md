@@ -1,11 +1,17 @@
 ---
 name: session-archive
-description: Archive recent Claude Code conversations before Claude Code deletes old transcripts. Use when the user says "archive my sessions", "sync sessions", "back up my Claude conversations", "save the recent conversations", "session archive status", "did the archive run?", or wants to make sure past sessions are not lost. It only archives (a digest + gzipped transcript per session); it does not summarize them into notes or a wiki.
+description: 'Archive recent Claude Code conversations before Claude Code deletes old transcripts. Use when the user says "archive sessions", "sync sessions", "back up Claude conversations", "save the recent conversations", "session archive status", "did the archive run?", or wants to make sure past sessions are not lost. It only archives (a digest + gzipped transcript per session); it does not summarize them into notes or a wiki.'
+version: "0.2.7"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [archive, sessions, backup]
 ---
 
 # session-archive
+
+## Purpose
+
+Keep a searchable copy of past Claude Code sessions (a digest plus the raw gzipped transcript) before Claude Code deletes old transcripts.
 
 One pair per Claude Code session in the archive folder: `YYYY-MM-DD_<slug>.digest.md` (metadata + the
 conversation text, tool calls cut) and `YYYY-MM-DD_<slug>.jsonl.gz` (the raw transcript). A session that kept
@@ -57,14 +63,33 @@ follow-up command failed: report it.
   a change, `session-archive plan` shows whether existing digests are still recognized
   (`already archived sessions`).
 - Retention: Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) from
-  `~/.claude/settings.json`. `session-archive status` warns when the last successful run is close to that.
-- A daily run without Claude: `./install.sh --schedule` from the repo (launchd on macOS, a crontab line on
+  the Claude Code user settings file. `session-archive status` warns when the last successful run is close to that.
+- A daily run without Claude: the repo installer with `--schedule` (launchd on macOS, a crontab line on
   Linux).
 
 ## Out of scope
 
 Summarizing sessions into notes or a wiki, deleting the original transcripts, editing past digests other than
 filling the TL;DR.
+
+## Prerequisites
+
+- Python 3.9+ (standard library only).
+- The plugin enabled, so the session-archive command is on the PATH; the installer needs bash.
+- Optional: launchd (macOS) or cron (Linux) for a daily run without Claude.
+
+## Limitations
+
+- Sessions written in the last 2 minutes, trivial ones (under 10 user turns or 50 KB) and subagent-only ones are skipped.
+- At most 40 pairs per run by default; run again until nothing is left.
+- It does not summarize sessions into notes or a wiki, and it never deletes the original transcripts.
+
+## Troubleshooting
+
+- Exit code 3: another run holds the lock. Wait, or check that no run is active and delete the lock file it names.
+- Exit code 4: the pre_command setting refused to start the run; report why and do not work around it.
+- Message "post_command exited N": the pairs were written but the follow-up command failed; report it.
+- Retention warning in status: the last successful run is close to the Claude Code cleanup period; run the archive now.
 
 ## Examples
 

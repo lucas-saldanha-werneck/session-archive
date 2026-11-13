@@ -43,7 +43,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TLDR_PLACEHOLDER = "<!-- TLDR: not written yet -->"
 # Temp folders only: "^" anchors to the start of the project folder name, so /tmp/x (-tmp-x) is skipped but
