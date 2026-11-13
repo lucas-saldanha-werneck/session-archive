@@ -1,6 +1,8 @@
 ---
 name: session-archive
 description: Archive recent Claude Code conversations before Claude Code deletes old transcripts. Use when the user says "archive my sessions", "sync sessions", "back up my Claude conversations", "save the recent conversations", "session archive status", "did the archive run?", or wants to make sure past sessions are not lost. It only archives (a digest + gzipped transcript per session); it does not summarize them into notes or a wiki.
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # session-archive
@@ -12,6 +14,14 @@ the digests themselves are the watermark.
 
 The command is `session-archive` (on the Bash tool's PATH while the plugin is enabled; full path
 `python3 "${CLAUDE_PLUGIN_ROOT}/bin/session-archive"`). `session-archive --help` lists every option.
+
+## Instructions
+
+1. `session-archive plan` to see what is new, then `session-archive run` (repeat while sessions are left).
+2. Fill the TL;DR line of each new digest.
+3. `session-archive verify`, then report what was written, what was skipped and where the archive is.
+
+The Steps section below has the details.
 
 ## Steps
 
@@ -55,3 +65,9 @@ follow-up command failed: report it.
 
 Summarizing sessions into notes or a wiki, deleting the original transcripts, editing past digests other than
 filling the TL;DR.
+
+## Examples
+
+- The user says "archive my sessions": plan, run, TL;DRs, verify, then a short report with the pairs written.
+- The user asks "did the archive run?": `session-archive status` shows the folder, the last run and any retention warning.
+- The user says "back up my Claude conversations" with many sessions pending: run repeats until nothing is left, or Claude says how many remain.
